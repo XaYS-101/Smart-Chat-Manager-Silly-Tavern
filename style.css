@@ -208,6 +208,22 @@
     display: none;
 }
 
+/* Nested folders: stacked left borders make the depth visible at a glance */
+.scm-folder-body .scm-folder-group {
+    margin-left: 0;
+}
+
+.scm-branch-radios {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.scm-branch-radios .checkbox_label {
+    align-items: flex-start;
+}
+
 /* Per-row "move to folder" button (lives inside .scm-badge-row) */
 .scm-move-btn {
     display: inline-flex;
@@ -220,6 +236,23 @@
 
 .scm-move-btn:hover {
     opacity: 1;
+}
+
+/* Checkbox for bulk selection */
+.scm-select-checkbox {
+    width: 20px;
+    height: 20px;
+    margin-right: 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+/* Toolbar wrapping */
+#scm_pc_toolbar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
 }
 
 /* ====================== Responsive: phones / narrow screens ====================== */
@@ -263,5 +296,35 @@
     .scm-folder-body {
         padding-left: 8px;
         margin-left: 4px;
+    }
+
+    /* Nested folders: reduce indent further at 3+ levels */
+    .scm-folder-body .scm-folder-body {
+        padding-left: 4px;
+        margin-left: 2px;
+    }
+
+    /* Increase tap targets for folder action buttons */
+    .scm-folder-header .scm-folder-act {
+        padding: 8px;
+        min-width: 32px;
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Increase tap target for move button */
+    .scm-move-btn {
+        padding: 8px;
+        min-width: 32px;
+        min-height: 32px;
+    }
+
+    /* Prevent iOS zoom on input focus */
+    .scm-move-root select,
+    .scm-move-root input[type="text"],
+    .scm-branch-choice input[type="text"] {
+        font-size: 16px;
     }
 }

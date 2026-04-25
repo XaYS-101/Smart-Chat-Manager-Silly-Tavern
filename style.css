@@ -145,6 +145,83 @@
     box-sizing: border-box;
 }
 
+/* ====================== Folders in past-chats list ====================== */
+.scm-folder-group {
+    margin: 4px 0 6px;
+}
+
+.scm-folder-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    margin: 4px 0 2px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    cursor: pointer;
+    user-select: none;
+}
+
+.scm-folder-header:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.scm-folder-header .scm-folder-toggle {
+    width: 14px;
+    text-align: center;
+    opacity: 0.75;
+}
+
+.scm-folder-header .fa-folder {
+    opacity: 0.85;
+}
+
+.scm-folder-header .scm-folder-name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.scm-folder-header .scm-folder-count {
+    opacity: 0.6;
+    font-size: 0.85em;
+}
+
+.scm-folder-header .scm-folder-act {
+    opacity: 0.5;
+    padding: 0 4px;
+}
+
+.scm-folder-header .scm-folder-act:hover {
+    opacity: 1;
+}
+
+.scm-folder-body {
+    padding-left: 14px;
+    border-left: 2px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.12));
+    margin-left: 6px;
+}
+
+.scm-folder-body[hidden] {
+    display: none;
+}
+
+/* Per-row "move to folder" button (lives inside .scm-badge-row) */
+.scm-move-btn {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    opacity: 0.55;
+    padding: 0 6px;
+    font-size: 0.9em;
+}
+
+.scm-move-btn:hover {
+    opacity: 1;
+}
+
 /* ====================== Responsive: phones / narrow screens ====================== */
 @media (max-width: 600px) {
     /* Stack horizontal rows in the settings panel and prompt-manager modal
@@ -180,5 +257,11 @@
     /* Smaller textarea so the modal form fits without excessive scrolling */
     .scm-pm-textarea {
         min-height: 160px;
+    }
+
+    /* Folder bodies indent less on narrow screens */
+    .scm-folder-body {
+        padding-left: 8px;
+        margin-left: 4px;
     }
 }

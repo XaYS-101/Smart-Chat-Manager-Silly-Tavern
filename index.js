@@ -36,7 +36,6 @@ import {
 import {
     extension_settings,
     getContext,
-    renderExtensionTemplateAsync,
 } from '../../../extensions.js';
 
 import {
@@ -52,7 +51,157 @@ import { selected_group } from '../../../group-chats.js';
  * ------------------------------------------------------------------ */
 
 const MODULE_NAME = 'SmartChatManager';
-const EXTENSION_FOLDER = 'third-party/SmartChatManager';
+
+/* ------------------------------------------------------------------
+ *  Settings panel HTML
+ *
+ *  Inlined so the extension works as long as index.js itself is
+ *  loaded, regardless of how the user copied or cloned the rest of
+ *  the package. The `settings.html` file in this package is kept as
+ *  documentation; it is no longer fetched at runtime.
+ * ------------------------------------------------------------------ */
+
+const SETTINGS_HTML = `
+<div id="scm_settings" class="scm-extension">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b data-scm-i18n="ext_title">Smart Chat Manager</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <div class="scm-section">
+                <label for="scm_language" data-scm-i18n="language">Language</label>
+                <select id="scm_language" class="text_pole">
+                    <option value="en">English</option>
+                    <option value="ru">Русский</option>
+                </select>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="scm-section">
+                <h4 data-scm-i18n="auto_name_header">Automatic Chat Naming</h4>
+                <label class="checkbox_label" for="scm_auto_name_enabled">
+                    <input id="scm_auto_name_enabled" type="checkbox" />
+                    <span data-scm-i18n="auto_name_enabled">Enable auto-naming</span>
+                </label>
+                <label for="scm_auto_name_threshold" data-scm-i18n="auto_name_threshold">Generate after N messages</label>
+                <input id="scm_auto_name_threshold" type="number" class="text_pole" min="2" max="100" step="1" value="6" />
+                <label class="checkbox_label" for="scm_auto_name_confirm">
+                    <input id="scm_auto_name_confirm" type="checkbox" />
+                    <span data-scm-i18n="auto_name_confirm">Ask for confirmation before renaming</span>
+                </label>
+                <label for="scm_naming_prompt" data-scm-i18n="naming_prompt">Naming system prompt</label>
+                <select id="scm_naming_prompt" class="text_pole"></select>
+                <div class="flex-container">
+                    <input id="scm_manual_rename" class="menu_button menu_button_icon" type="button"
+                           value="Suggest a Name Now" data-scm-i18n="[value]manual_rename" />
+                </div>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="scm-section">
+                <h4 data-scm-i18n="tag_header">Tags for Current Chat</h4>
+                <div class="scm-current-tags-row">
+                    <div id="scm_current_tags" class="scm-tag-list"></div>
+                </div>
+                <div class="flex-container">
+                    <input id="scm_new_tag" class="text_pole flex1" type="text"
+                           placeholder="new tag…" data-scm-i18n="[placeholder]tag_placeholder" />
+                    <input id="scm_add_tag" class="menu_button" type="button"
+                           value="Add" data-scm-i18n="[value]tag_add" />
+                    <input id="scm_auto_tag" class="menu_button" type="button"
+                           value="Auto-Tag" data-scm-i18n="[value]tag_auto" />
+                </div>
+                <label for="scm_tagging_prompt" data-scm-i18n="tagging_prompt">Tagging system prompt</label>
+                <select id="scm_tagging_prompt" class="text_pole"></select>
+                <small class="scm-hint" data-scm-i18n="tag_hint">
+                    Tags are stored inside the extension's settings, not inside the chat file.
+                </small>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="scm-section">
+                <h4 data-scm-i18n="pm_header">Prompt Library</h4>
+                <small class="scm-hint" data-scm-i18n="pm_hint">
+                    System prompts used for naming and tagging. Placeholders:
+                    <code>{{char}}</code>, <code>{{user}}</code>. The chat transcript is sent
+                    automatically as the user message.
+                </small>
+                <div class="flex-container">
+                    <input id="scm_open_prompt_manager" class="menu_button menu_button_icon" type="button"
+                           value="Manage Prompts…" data-scm-i18n="[value]pm_open" />
+                </div>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="scm-section">
+                <h4 data-scm-i18n="api_header">LLM Source for Naming &amp; Tagging</h4>
+                <label for="scm_api_source" data-scm-i18n="api_source">API Source</label>
+                <select id="scm_api_source" class="text_pole">
+                    <option value="st" data-scm-i18n="api_source_st">ST Default (active connection)</option>
+                    <option value="custom" data-scm-i18n="api_source_custom">Custom API (OpenAI-compatible)</option>
+                </select>
+                <small class="scm-hint" data-scm-i18n="api_st_hint">
+                    Even when using ST Default, the connection profile's system prompt is
+                    overridden with the prompts from the Prompt Library above.
+                </small>
+
+                <div id="scm_custom_api_block" class="scm-subsection">
+                    <label for="scm_completion_mode" data-scm-i18n="completion_mode">Completion mode</label>
+                    <select id="scm_completion_mode" class="text_pole">
+                        <option value="chat" data-scm-i18n="completion_mode_chat">Chat Completion (system + user)</option>
+                        <option value="text" data-scm-i18n="completion_mode_text">Text Completion (single prompt)</option>
+                    </select>
+
+                    <label class="checkbox_label" for="scm_api_rotate">
+                        <input id="scm_api_rotate" type="checkbox" />
+                        <span data-scm-i18n="api_rotate">Rotate through saved profiles (round-robin)</span>
+                    </label>
+
+                    <hr class="sysHR" />
+
+                    <label for="scm_profile_select" data-scm-i18n="api_active_profile">Active Profile</label>
+                    <div class="flex-container">
+                        <select id="scm_profile_select" class="text_pole flex1"></select>
+                        <input id="scm_profile_new" class="menu_button" type="button"
+                               value="New" data-scm-i18n="[value]api_new" />
+                        <input id="scm_profile_delete" class="menu_button" type="button"
+                               value="Delete" data-scm-i18n="[value]api_delete" />
+                    </div>
+
+                    <label for="scm_profile_name" data-scm-i18n="api_profile_name">Profile name</label>
+                    <input id="scm_profile_name" type="text" class="text_pole" placeholder="My profile" autocomplete="off" />
+
+                    <label for="scm_custom_url" data-scm-i18n="api_url">API URL</label>
+                    <input id="scm_custom_url" type="text" class="text_pole" placeholder="https://api.openai.com/v1" autocomplete="off" />
+
+                    <label for="scm_custom_key" data-scm-i18n="api_key">API Key</label>
+                    <input id="scm_custom_key" type="password" class="text_pole" placeholder="sk-…" autocomplete="off" />
+
+                    <label for="scm_custom_model" data-scm-i18n="api_model">Model Name</label>
+                    <input id="scm_custom_model" type="text" class="text_pole" placeholder="gpt-4o-mini" autocomplete="off" />
+
+                    <div class="flex-container">
+                        <input id="scm_profile_save" class="menu_button" type="button"
+                               value="Save Profile" data-scm-i18n="[value]api_save" />
+                    </div>
+
+                    <small class="scm-hint" data-scm-i18n="api_hint">
+                        Keys are stored inside the extension's settings on this device only.
+                        Never share or commit your settings file.
+                    </small>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+`;
 
 const DEFAULT_PROMPTS = Object.freeze({
     default_naming: {
@@ -1373,8 +1522,20 @@ jQuery(async () => {
     try {
         getSettings();
 
-        const html = await renderExtensionTemplateAsync(EXTENSION_FOLDER, 'settings');
-        $('#extensions_settings2').append(html);
+        // Inject the settings panel. We mount into #extensions_settings2,
+        // falling back to #extensions_settings, then to <body> if neither
+        // container exists yet (e.g. on a stripped-down ST build).
+        const $host = $('#extensions_settings2').length
+            ? $('#extensions_settings2')
+            : ($('#extensions_settings').length ? $('#extensions_settings') : $('body'));
+        $host.append(SETTINGS_HTML);
+
+        // Verify the panel mounted before wiring handlers; if anything
+        // upstream stripped it (e.g. a sanitizer), bail out cleanly.
+        if (!document.getElementById('scm_settings')) {
+            console.error(`[${MODULE_NAME}] settings panel failed to mount.`);
+            return;
+        }
 
         bindSettingsPanel();
         applyTranslations(document.getElementById('scm_settings'));

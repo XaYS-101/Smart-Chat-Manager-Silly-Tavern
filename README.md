@@ -1,3 +1,7 @@
+[English](README.md) | [Русский](README_ru.md)
+
+---
+
 # Smart Chat Manager
 
 A SillyTavern extension that brings real chat-management ergonomics to a frontend that has, frankly, never had any. It auto-titles your chats, lets you tag them, ships a prompt library and a multi-profile API manager, and overhauls the chats panel with search, sort, and inline badges.

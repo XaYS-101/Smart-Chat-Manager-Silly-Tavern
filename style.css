@@ -1,0 +1,143 @@
+/* Smart Chat Manager - styles */
+
+#scm_settings .scm-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+#scm_settings .scm-section h4 {
+    margin: 4px 0 2px 0;
+}
+
+#scm_settings .scm-subsection {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+#scm_settings .scm-hint {
+    opacity: 0.7;
+    font-size: 0.85em;
+    line-height: 1.3;
+}
+
+#scm_settings .scm-hint code {
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+#scm_settings .scm-current-tags-row {
+    min-height: 28px;
+}
+
+#scm_settings .scm-tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+#scm_settings .scm-tag-empty {
+    opacity: 0.5;
+    font-style: italic;
+    font-size: 0.9em;
+}
+
+#scm_settings .scm-tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    color: #fff;
+    font-size: 0.85em;
+    line-height: 1.3;
+    user-select: none;
+}
+
+#scm_settings .scm-tag-x {
+    cursor: pointer;
+    font-weight: 700;
+    opacity: 0.8;
+    padding: 0 2px;
+}
+
+#scm_settings .scm-tag-x:hover {
+    opacity: 1;
+}
+
+/* Past Chats overhaul */
+#scm_pc_toolbar {
+    margin: 6px 0;
+    padding: 4px 0;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1));
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1));
+}
+
+#scm_pc_toolbar label {
+    margin: 0 4px 0 8px;
+    white-space: nowrap;
+}
+
+.scm-badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0 2px 4px;
+}
+
+.scm-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    color: #fff;
+    font-size: 0.75em;
+    line-height: 1.4;
+    letter-spacing: 0.2px;
+    user-select: none;
+}
+
+/* Prompt Manager modal */
+.scm-pm-root {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+    min-width: 480px;
+}
+
+.scm-pm-toolbar {
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.scm-pm-label {
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.scm-pm-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+}
+
+.scm-pm-textarea {
+    width: 100%;
+    min-height: 220px;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.9em;
+    line-height: 1.4;
+    resize: vertical;
+}

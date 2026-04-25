@@ -110,7 +110,9 @@
     flex-direction: column;
     gap: 8px;
     text-align: left;
-    min-width: 480px;
+    width: 100%;
+    max-width: 720px;
+    box-sizing: border-box;
 }
 
 .scm-pm-toolbar {
@@ -140,4 +142,43 @@
     font-size: 0.9em;
     line-height: 1.4;
     resize: vertical;
+    box-sizing: border-box;
+}
+
+/* ====================== Responsive: phones / narrow screens ====================== */
+@media (max-width: 600px) {
+    /* Stack horizontal rows in the settings panel and prompt-manager modal
+       so each input/button gets full width on narrow screens. */
+    #scm_settings .flex-container,
+    .scm-pm-root .scm-pm-toolbar,
+    .scm-pm-root .flex-container {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    /* Full-width tap targets inside those stacked rows */
+    #scm_settings .flex-container .menu_button,
+    #scm_settings .flex-container .menu_button_icon,
+    .scm-pm-root .scm-pm-toolbar .menu_button,
+    .scm-pm-root .flex-container .menu_button,
+    .scm-pm-root .flex-container .menu_button_icon {
+        width: 100%;
+    }
+
+    /* Labels in stacked rows shouldn't reserve a fixed-width column */
+    .scm-pm-label,
+    #scm_pc_toolbar label {
+        margin: 0;
+        white-space: normal;
+    }
+
+    /* Tighter padding so subsections don't waste horizontal space */
+    #scm_settings .scm-subsection {
+        padding: 6px;
+    }
+
+    /* Smaller textarea so the modal form fits without excessive scrolling */
+    .scm-pm-textarea {
+        min-height: 160px;
+    }
 }

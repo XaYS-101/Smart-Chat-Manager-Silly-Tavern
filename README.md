@@ -21,7 +21,7 @@ A SillyTavern extension that brings real chat-management ergonomics to a fronten
 - Tags live in `extension_settings.SmartChatManager.tags`, keyed by chat file name. The chat `.jsonl` files are never modified.
 
 ### 3. Past Chats UI overhaul
-Injected into the existing Manage Chat Files popup (`#shadow_select_chat_popup`):
+Injected into the existing Manage Chat Files popup:
 - 🔎 Tag-search bar (multi-term, AND logic).
 - 🔃 Sort dropdown: Last Message Date / Date Created / Alphabetical.
 - 🏷️ Coloured tag badges under each chat name.
@@ -50,9 +50,7 @@ Injected into the existing Manage Chat Files popup (`#shadow_select_chat_popup`)
 
 ## Installation
 
-### Option A — via SillyTavern's "Install Extension" UI
-1. Push this folder to a public Git repo.
-2. In SillyTavern → **Extensions → Install extension**, paste the repo URL.
+In SillyTavern → **Extensions → Install extension**, paste the repo URL.
 
 ## Error handling
 

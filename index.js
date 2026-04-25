@@ -28,6 +28,7 @@ import {
     renameChat,
     getCurrentChatId,
     chat as currentChat,
+    chat_metadata,
     characters,
     this_chid,
     name1,
@@ -198,6 +199,22 @@ const SETTINGS_HTML = `
                 </div>
             </div>
 
+            <hr class="sysHR" />
+
+            <!-- ====================== Reset ====================== -->
+            <div class="scm-section">
+                <h4 data-scm-i18n="reset_header">Reset Extension</h4>
+                <small class="scm-hint" data-scm-i18n="reset_hint">
+                    Erases every Smart Chat Manager setting on this device:
+                    folders, tags, auto-naming history, custom prompts and API
+                    profiles. Your actual chat files are not affected.
+                </small>
+                <div class="flex-container">
+                    <input id="scm_reset_all" class="menu_button redWarningBG" type="button"
+                           value="Delete All Extension Data" data-scm-i18n="[value]reset_button" />
+                </div>
+            </div>
+
         </div>
     </div>
 </div>
@@ -251,8 +268,12 @@ const DEFAULT_SETTINGS = {
         promptId: 'default_tagging',
     },
 
-    tags: {},                        // { [chatFileName]: string[] }
-    autoNamed: {},                   // { [chatFileName]: true }
+    tags: {},                        // { [chatKey]: string[] }
+    autoNamed: {},                   // { [chatKey]: true }
+
+    folders: {},                     // { [folderId]: { id, name, chats: chatKey[], collapsed: bool } }
+    chatFolder: {},                  // { [chatKey]: folderId }
+    branchPromptedFor: [],           // chatKeys we've already shown the branch prompt for
 
     prompts: {                       // populated from DEFAULT_PROMPTS on first run
         default_naming: { ...DEFAULT_PROMPTS.default_naming },
@@ -346,6 +367,27 @@ const I18N = {
         pc_sort_alpha: 'Alphabetical',
         pc_no_tags: 'no tags',
 
+        folder_new: 'New folder…',
+        folder_name_prompt: 'Folder name',
+        folder_delete_confirm: 'Delete this folder? Chats inside will return to the general list.',
+        folder_none: 'no folder',
+        folder_move_title: 'Move chat to folder',
+        folder_move_select_label: 'Pick a folder:',
+        folder_rename: 'Rename',
+        folder_delete: 'Delete',
+        branch_prompt_title: 'Branch created',
+        branch_prompt_body: 'Group the parent chat and its branches in one folder. You can edit the folder name below.',
+        branch_default_folder_name: 'Branches: {name}',
+
+        reset_header: 'Reset Extension',
+        reset_hint: 'Erases every Smart Chat Manager setting on this device: folders, tags, auto-naming history, custom prompts and API profiles. Your actual chat files are not affected.',
+        reset_button: 'Delete All Extension Data',
+        reset_confirm_1_title: 'Delete all Smart Chat Manager data?',
+        reset_confirm_1_body: 'This will permanently erase all folders, tags, auto-naming history, custom prompts and saved API profiles. Chat files on disk are NOT touched.',
+        reset_confirm_2_title: 'Are you absolutely sure?',
+        reset_confirm_2_body: 'Last chance. This action cannot be undone.',
+        reset_done: 'Smart Chat Manager has been reset.',
+
         toast_no_chat: 'Open a chat first.',
         toast_naming: 'Generating a chat name…',
         toast_tagging: 'Asking the LLM for tags…',
@@ -430,6 +472,27 @@ const I18N = {
         pc_sort_alpha: 'По алфавиту',
         pc_no_tags: 'нет тегов',
 
+        folder_new: 'Новая папка…',
+        folder_name_prompt: 'Название папки',
+        folder_delete_confirm: 'Удалить эту папку? Чаты внутри вернутся в общий список.',
+        folder_none: 'без папки',
+        folder_move_title: 'Переместить чат в папку',
+        folder_move_select_label: 'Выберите папку:',
+        folder_rename: 'Переименовать',
+        folder_delete: 'Удалить',
+        branch_prompt_title: 'Создан бранч',
+        branch_prompt_body: 'Сгруппировать родительский чат и его бранчи в одну папку. Имя папки можно изменить ниже.',
+        branch_default_folder_name: 'Бранчи: {name}',
+
+        reset_header: 'Сброс расширения',
+        reset_hint: 'Стирает все настройки Smart Chat Manager на этом устройстве: папки, теги, историю авто-именования, пользовательские промпты и API-профили. Файлы чатов на диске не затрагиваются.',
+        reset_button: 'Удалить все данные расширения',
+        reset_confirm_1_title: 'Удалить все данные Smart Chat Manager?',
+        reset_confirm_1_body: 'Будут безвозвратно удалены все папки, теги, история авто-именования, пользовательские промпты и сохранённые API-профили. Файлы чатов на диске НЕ затрагиваются.',
+        reset_confirm_2_title: 'Вы точно уверены?',
+        reset_confirm_2_body: 'Последний шанс. Это действие нельзя отменить.',
+        reset_done: 'Smart Chat Manager сброшен.',
+
         toast_no_chat: 'Сначала откройте чат.',
         toast_naming: 'Генерируем имя чата…',
         toast_tagging: 'Запрашиваем теги у LLM…',
@@ -484,6 +547,32 @@ function getSettings() {
     s.autoNamed ??= {};
     s.sort ??= 'last_mes';
     s.tagSearch ??= '';
+
+    s.folders ??= {};
+    s.chatFolder ??= {};
+    s.branchPromptedFor ??= [];
+
+    // One-time migration: re-key tags / autoNamed entries that were stored
+    // with a trailing `.jsonl` (a leftover from when refreshPastChatsBadges
+    // looked up keys by the past-chats template's filename attribute).
+    let migrated = false;
+    for (const k of Object.keys(s.tags)) {
+        const norm = chatKey(k);
+        if (norm !== k) {
+            s.tags[norm] = Array.from(new Set([...(s.tags[norm] || []), ...s.tags[k]]));
+            delete s.tags[k];
+            migrated = true;
+        }
+    }
+    for (const k of Object.keys(s.autoNamed)) {
+        const norm = chatKey(k);
+        if (norm !== k) {
+            s.autoNamed[norm] = s.autoNamed[norm] || s.autoNamed[k];
+            delete s.autoNamed[k];
+            migrated = true;
+        }
+    }
+    if (migrated) saveSettingsDebounced();
 
     // Prompts: ensure built-ins exist; preserve user edits to them.
     s.prompts ??= {};
@@ -811,22 +900,30 @@ async function runAutoName({ force = false } = {}) {
  *  Tagging
  * ------------------------------------------------------------------ */
 
+function chatKey(name) {
+    if (!name) return '';
+    return String(name).replace(/\.jsonl$/i, '');
+}
+
 function getTags(fileName) {
     const s = getSettings();
-    return Array.isArray(s.tags[fileName]) ? s.tags[fileName] : [];
+    const k = chatKey(fileName);
+    return Array.isArray(s.tags[k]) ? s.tags[k] : [];
 }
 
 function setTags(fileName, tags) {
     const s = getSettings();
+    const k = chatKey(fileName);
+    if (!k) return;
     const cleaned = Array.from(new Set(
         (tags || [])
             .map(x => String(x).trim().toLowerCase())
             .filter(x => x.length > 0 && x.length <= 32),
     ));
     if (cleaned.length === 0) {
-        delete s.tags[fileName];
+        delete s.tags[k];
     } else {
-        s.tags[fileName] = cleaned;
+        s.tags[k] = cleaned;
     }
     saveSettings();
 }
@@ -837,6 +934,73 @@ function addTag(fileName, tag) {
 
 function removeTag(fileName, tag) {
     setTags(fileName, getTags(fileName).filter(x => x !== tag));
+}
+
+/* ------------------------------------------------------------------
+ *  Folders
+ * ------------------------------------------------------------------ */
+
+function uidFolder() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return 'f_' + crypto.randomUUID();
+    }
+    return 'f_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function createFolder(name) {
+    const s = getSettings();
+    const id = uidFolder();
+    s.folders[id] = {
+        id,
+        name: String(name || '').trim() || 'Folder',
+        chats: [],
+        collapsed: false,
+    };
+    saveSettings();
+    return id;
+}
+
+function renameFolder(folderId, name) {
+    const s = getSettings();
+    if (!s.folders[folderId]) return;
+    s.folders[folderId].name = String(name || '').trim() || s.folders[folderId].name;
+    saveSettings();
+}
+
+function deleteFolder(folderId) {
+    const s = getSettings();
+    const f = s.folders[folderId];
+    if (!f) return;
+    for (const k of f.chats) {
+        if (s.chatFolder[k] === folderId) delete s.chatFolder[k];
+    }
+    delete s.folders[folderId];
+    saveSettings();
+}
+
+function moveChatToFolder(fileName, folderId) {
+    const s = getSettings();
+    const k = chatKey(fileName);
+    if (!k) return;
+    const oldId = s.chatFolder[k];
+    if (oldId && s.folders[oldId]) {
+        s.folders[oldId].chats = s.folders[oldId].chats.filter(c => c !== k);
+    }
+    if (folderId && s.folders[folderId]) {
+        if (!s.folders[folderId].chats.includes(k)) s.folders[folderId].chats.push(k);
+        s.chatFolder[k] = folderId;
+    } else {
+        delete s.chatFolder[k];
+    }
+    saveSettings();
+}
+
+function getFolderForChat(fileName) {
+    const s = getSettings();
+    const k = chatKey(fileName);
+    if (!k) return null;
+    const id = s.chatFolder[k];
+    return (id && s.folders[id]) ? s.folders[id] : null;
 }
 
 function renderCurrentTags() {
@@ -949,6 +1113,8 @@ function injectPastChatsToolbar() {
             <option value="created">${escapeHtml(t('pc_sort_created'))}</option>
             <option value="alpha">${escapeHtml(t('pc_sort_alpha'))}</option>
         </select>
+        <input id="scm_pc_new_folder" class="menu_button" type="button"
+               value="${escapeHtml(t('folder_new'))}" />
     `;
     header.parentElement.insertBefore(bar, header.nextSibling);
     bar.querySelector('#scm_pc_sort').value = s.sort;
@@ -963,6 +1129,12 @@ function injectPastChatsToolbar() {
         saveSettings();
         applyPastChatsFilterAndSort();
     });
+    bar.querySelector('#scm_pc_new_folder').addEventListener('click', async () => {
+        const nm = await callGenericPopup(t('folder_name_prompt'), POPUP_TYPE.INPUT, '');
+        if (typeof nm !== 'string' || !nm.trim()) return;
+        createFolder(nm);
+        applyPastChatsFilterAndSort();
+    });
 }
 
 function refreshPastChatsBadges() {
@@ -975,10 +1147,22 @@ function refreshPastChatsBadges() {
         wrapper.querySelectorAll('.scm-badge-row').forEach(n => n.remove());
 
         const tags = getTags(fileName);
-        if (tags.length === 0) return;
 
         const row = document.createElement('div');
         row.className = 'scm-badge-row';
+
+        // Folder move button — always present, even with no tags.
+        const moveBtn = document.createElement('span');
+        moveBtn.className = 'scm-move-btn';
+        moveBtn.title = t('folder_move_title');
+        moveBtn.innerHTML = '<i class="fa-solid fa-folder-tree"></i>';
+        moveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openFolderPickerForChat(fileName).catch(err =>
+                console.error(`[${MODULE_NAME}] folder picker failed`, err));
+        });
+        row.appendChild(moveBtn);
+
         for (const tag of tags) {
             const badge = document.createElement('span');
             badge.className = 'scm-badge';
@@ -986,6 +1170,7 @@ function refreshPastChatsBadges() {
             badge.textContent = tag;
             row.appendChild(badge);
         }
+
         const mes = block.querySelector('.select_chat_block_mes');
         if (mes && mes.parentElement) {
             mes.parentElement.insertBefore(row, mes.nextSibling);
@@ -1000,21 +1185,193 @@ function applyPastChatsFilterAndSort() {
     if (!list) return;
     const s = getSettings();
     const query = s.tagSearch.trim().toLowerCase();
-
-    const wrappers = Array.from(list.querySelectorAll('.select_chat_block_wrapper'));
     const terms = query.split(/[\s,]+/).filter(Boolean);
-    wrappers.forEach((w) => {
+
+    // Mark the whole pass as ours so the MutationObserver ignores all the
+    // DOM churn from teardown + re-render. Without this, the teardown phase
+    // would loop the observer at 60fps via requestAnimationFrame.
+    list.dataset.scmRendering = '1';
+    try {
+        // Tear down any prior folder scaffolding so we can re-flatten the list.
+        list.querySelectorAll('.scm-folder-group').forEach(group => {
+            const body = group.querySelector('.scm-folder-body');
+            if (body) {
+                while (body.firstChild) list.appendChild(body.firstChild);
+            }
+            group.remove();
+        });
+
+        const wrappers = Array.from(list.querySelectorAll('.select_chat_block_wrapper'));
+        wrappers.forEach((w) => {
+            const fileName = w.querySelector('.select_chat_block')?.getAttribute('file_name') || '';
+            const tags = getTags(fileName);
+            const visible = terms.length === 0
+                ? true
+                : terms.every(term => tags.some(tag => tag.includes(term)));
+            w.style.display = visible ? '' : 'none';
+        });
+
+        const visibleWrappers = wrappers.filter(w => w.style.display !== 'none');
+        visibleWrappers.sort((a, b) => sortChatBlocks(a, b, s.sort));
+
+        // Append in sort order, then wrap into folder groups.
+        visibleWrappers.forEach(w => list.appendChild(w));
+        applyFolderGrouping(visibleWrappers, list, terms.length > 0);
+    } finally {
+        delete list.dataset.scmRendering;
+    }
+}
+
+function applyFolderGrouping(visibleWrappers, list, isFiltering) {
+    const s = getSettings();
+    const folderIds = Object.keys(s.folders).sort((a, b) =>
+        s.folders[a].name.localeCompare(s.folders[b].name));
+    if (folderIds.length === 0) return;
+
+    const buckets = new Map();
+    for (const w of visibleWrappers) {
         const fileName = w.querySelector('.select_chat_block')?.getAttribute('file_name') || '';
-        const tags = getTags(fileName);
-        const visible = terms.length === 0
-            ? true
-            : terms.every(term => tags.some(tag => tag.includes(term)));
-        w.style.display = visible ? '' : 'none';
+        const k = chatKey(fileName);
+        const fid = s.chatFolder[k];
+        if (fid && s.folders[fid]) {
+            if (!buckets.has(fid)) buckets.set(fid, []);
+            buckets.get(fid).push(w);
+        }
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const fid of folderIds) {
+        const folder = s.folders[fid];
+        const members = buckets.get(fid) || [];
+        // Hide empty folders entirely while a tag filter is active; otherwise
+        // keep them visible so the user can drop chats in.
+        if (members.length === 0 && isFiltering) continue;
+
+        const group = document.createElement('div');
+        group.className = 'scm-folder-group';
+        group.dataset.folderId = fid;
+
+        const header = buildFolderHeader(folder, members.length);
+        const body = document.createElement('div');
+        body.className = 'scm-folder-body';
+        if (folder.collapsed) body.hidden = true;
+        for (const w of members) body.appendChild(w);
+
+        group.appendChild(header);
+        group.appendChild(body);
+        frag.appendChild(group);
+    }
+    // Folder groups go above ungrouped chats (which remain in document order).
+    list.insertBefore(frag, list.firstChild);
+}
+
+function buildFolderHeader(folder, visibleCount) {
+    const h = document.createElement('div');
+    h.className = 'scm-folder-header';
+    h.dataset.folderId = folder.id;
+
+    const tog = document.createElement('span');
+    tog.className = 'scm-folder-toggle';
+    tog.textContent = folder.collapsed ? '▶' : '▼';
+    h.appendChild(tog);
+
+    const ic = document.createElement('i');
+    ic.className = 'fa-solid fa-folder';
+    h.appendChild(ic);
+
+    const name = document.createElement('span');
+    name.className = 'scm-folder-name';
+    name.textContent = folder.name;
+    h.appendChild(name);
+
+    const cnt = document.createElement('span');
+    cnt.className = 'scm-folder-count';
+    cnt.textContent = `(${visibleCount})`;
+    h.appendChild(cnt);
+
+    const ren = document.createElement('span');
+    ren.className = 'scm-folder-act fa-solid fa-pen';
+    ren.title = t('folder_rename');
+    h.appendChild(ren);
+
+    const del = document.createElement('span');
+    del.className = 'scm-folder-act fa-solid fa-xmark';
+    del.title = t('folder_delete');
+    h.appendChild(del);
+
+    h.addEventListener('click', () => {
+        const s = getSettings();
+        if (!s.folders[folder.id]) return;
+        s.folders[folder.id].collapsed = !s.folders[folder.id].collapsed;
+        saveSettings();
+        applyPastChatsFilterAndSort();
     });
 
-    const visibleWrappers = wrappers.filter(w => w.style.display !== 'none');
-    visibleWrappers.sort((a, b) => sortChatBlocks(a, b, s.sort));
-    visibleWrappers.forEach(w => list.appendChild(w));
+    ren.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const v = await callGenericPopup(t('folder_name_prompt'), POPUP_TYPE.INPUT, folder.name);
+        if (typeof v === 'string' && v.trim()) {
+            renameFolder(folder.id, v);
+            applyPastChatsFilterAndSort();
+        }
+    });
+
+    del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const ok = await callGenericPopup(t('folder_delete_confirm'), POPUP_TYPE.CONFIRM);
+        if (ok === POPUP_RESULT.AFFIRMATIVE) {
+            deleteFolder(folder.id);
+            applyPastChatsFilterAndSort();
+        }
+    });
+
+    return h;
+}
+
+async function openFolderPickerForChat(fileName) {
+    const s = getSettings();
+    const k = chatKey(fileName);
+    if (!k) return;
+    const currentFid = s.chatFolder[k] || '';
+
+    const opts = [`<option value="">— ${escapeHtml(t('folder_none'))} —</option>`];
+    const sortedIds = Object.keys(s.folders).sort((a, b) =>
+        s.folders[a].name.localeCompare(s.folders[b].name));
+    for (const id of sortedIds) {
+        const sel = id === currentFid ? ' selected' : '';
+        opts.push(`<option value="${escapeHtml(id)}"${sel}>${escapeHtml(s.folders[id].name)}</option>`);
+    }
+    opts.push(`<option value="__new__">+ ${escapeHtml(t('folder_new'))}</option>`);
+
+    const html = `
+        <div class="scm-move-root">
+            <h3>${escapeHtml(t('folder_move_title'))}</h3>
+            <div class="scm-hint">${escapeHtml(fileName)}</div>
+            <label for="scm_move_select">${escapeHtml(t('folder_move_select_label'))}</label>
+            <select id="scm_move_select" class="text_pole" style="width:100%;">${opts.join('')}</select>
+        </div>
+    `;
+
+    // Open the popup, then capture the select value via a change handler so
+    // we still have it after the popup DOM is torn down on close.
+    const popupPromise = callGenericPopup(html, POPUP_TYPE.CONFIRM);
+    let chosen = currentFid;
+    await new Promise(r => setTimeout(r, 0));
+    const $sel = document.getElementById('scm_move_select');
+    if ($sel) {
+        chosen = $sel.value;
+        $sel.addEventListener('change', () => { chosen = $sel.value; });
+    }
+    const result = await popupPromise;
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    if (chosen === '__new__') {
+        const nm = await callGenericPopup(t('folder_name_prompt'), POPUP_TYPE.INPUT, '');
+        if (typeof nm !== 'string' || !nm.trim()) return;
+        chosen = createFolder(nm);
+    }
+    moveChatToFolder(fileName, chosen || null);
+    applyPastChatsFilterAndSort();
 }
 
 function sortChatBlocks(a, b, sortKey) {
@@ -1024,17 +1381,17 @@ function sortChatBlocks(a, b, sortKey) {
     if (sortKey === 'alpha') return aName.localeCompare(bName);
 
     if (sortKey === 'created') {
-        const re = /(\d{4})-(\d{2})-(\d{2})[\s_]@?(\d{1,2})h[\s_]?(\d{1,2})m/;
+        const re = /(\d{4})-(\d{1,2})-(\d{1,2})[ _]?@?(\d{1,2})h[ _]?(\d{1,2})m(?:(\d{1,2})s)?(?:(\d{1,3})ms)?/;
         const aT = aName.match(re);
         const bT = bName.match(re);
         if (aT && bT) {
-            const aKey = aT.slice(1).map(Number).reduce((acc, v) => acc * 100 + v, 0);
-            const bKey = bT.slice(1).map(Number).reduce((acc, v) => acc * 100 + v, 0);
+            const aKey = Date.UTC(+aT[1], +aT[2] - 1, +aT[3], +aT[4], +aT[5], +(aT[6] || 0), +(aT[7] || 0));
+            const bKey = Date.UTC(+bT[1], +bT[2] - 1, +bT[3], +bT[4], +bT[5], +(bT[6] || 0), +(bT[7] || 0));
             return bKey - aKey;
         }
         return aName.localeCompare(bName);
     }
-    return 0; // last_mes — preserve ST's existing order
+    return 0; // last_mes — preserve ST's existing order (already sorted server-side).
 }
 
 /* ------------------------------------------------------------------
@@ -1450,6 +1807,40 @@ function bindSettingsPanel() {
 
     // Profiles
     bindProfileManager();
+
+    // Reset
+    document.getElementById('scm_reset_all').addEventListener('click', () => {
+        runResetFlow().catch(err => console.error(`[${MODULE_NAME}] reset failed`, err));
+    });
+}
+
+async function runResetFlow() {
+    const html1 = `
+        <h3>${escapeHtml(t('reset_confirm_1_title'))}</h3>
+        <p>${escapeHtml(t('reset_confirm_1_body'))}</p>
+    `;
+    const r1 = await callGenericPopup(html1, POPUP_TYPE.CONFIRM);
+    if (r1 !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    const html2 = `
+        <h3>${escapeHtml(t('reset_confirm_2_title'))}</h3>
+        <p><b>${escapeHtml(t('reset_confirm_2_body'))}</b></p>
+    `;
+    const r2 = await callGenericPopup(html2, POPUP_TYPE.CONFIRM);
+    if (r2 !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    resetExtension();
+}
+
+function resetExtension() {
+    extension_settings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
+    saveSettingsDebounced();
+
+    // Reload to guarantee every cached UI surface reflects the wiped state
+    // — settings panel inputs, past-chats toolbar, observers, branchPromptedFor,
+    // the lot. The double-confirm above gates this hard reset.
+    toastr.success(t('reset_done'));
+    setTimeout(() => location.reload(), 400);
 }
 
 /* ------------------------------------------------------------------
@@ -1469,6 +1860,61 @@ function onMessageEvent() {
 
 function onChatChanged() {
     renderCurrentTags();
+    maybePromptBranchFolder().catch(err =>
+        console.error(`[${MODULE_NAME}] branch folder prompt failed`, err));
+}
+
+async function maybePromptBranchFolder() {
+    const s = getSettings();
+    const branchName = getCurrentChatId();
+    if (!branchName) return;
+
+    const parentName = chat_metadata && chat_metadata.main_chat;
+    if (!parentName) return; // not a branch
+
+    const branchK = chatKey(branchName);
+    const parentK = chatKey(parentName);
+    if (!branchK || !parentK || branchK === parentK) return;
+    if (s.branchPromptedFor.includes(branchK)) return;
+
+    // Mark as handled FIRST so we don't double-prompt if events fire twice.
+    s.branchPromptedFor.push(branchK);
+    if (s.branchPromptedFor.length > 500) {
+        s.branchPromptedFor.splice(0, s.branchPromptedFor.length - 500);
+    }
+    saveSettings();
+
+    // Determine default folder name: reuse parent's folder if any, else
+    // suggest a name derived from the parent chat.
+    const parentFolderId = s.chatFolder[parentK];
+    const parentFolder = parentFolderId && s.folders[parentFolderId] ? s.folders[parentFolderId] : null;
+    const defaultName = parentFolder
+        ? parentFolder.name
+        : t('branch_default_folder_name').replace('{name}', parentK);
+
+    const html = `
+        <h3>${escapeHtml(t('branch_prompt_title'))}</h3>
+        <p>${escapeHtml(t('branch_prompt_body'))}</p>
+    `;
+    const folderName = await callGenericPopup(html, POPUP_TYPE.INPUT, defaultName);
+    if (typeof folderName !== 'string' || !folderName.trim()) return;
+
+    let folderId = parentFolder
+        ? parentFolderId
+        : (function () {
+            // If a folder with this exact name already exists, reuse it.
+            const lower = folderName.trim().toLowerCase();
+            for (const id of Object.keys(s.folders)) {
+                if (s.folders[id].name.toLowerCase() === lower) return id;
+            }
+            return createFolder(folderName);
+        })();
+
+    if (parentFolder && parentFolder.name !== folderName.trim()) {
+        renameFolder(folderId, folderName);
+    }
+    moveChatToFolder(parentName, folderId);
+    moveChatToFolder(branchName, folderId);
 }
 
 /* ------------------------------------------------------------------
@@ -1489,6 +1935,8 @@ function startPastChatsObserver() {
     if (!target) return;
     let pending = false;
     new MutationObserver(() => {
+        // Skip mutations that came from our own re-grouping pass.
+        if (target.dataset.scmRendering === '1') return;
         if (pending) return;
         pending = true;
         requestAnimationFrame(() => {

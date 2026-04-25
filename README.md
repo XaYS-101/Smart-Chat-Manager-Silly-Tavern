@@ -18,7 +18,7 @@ A SillyTavern extension that brings real chat-management ergonomics to a fronten
 ### 2. Tagging system
 - **Manual:** add / remove tags from the extension settings panel for the current chat.
 - **Auto-Tag button:** asks the LLM for 3-5 short comma-separated keyword tags.
-- Tags live in `extension_settings.SmartChatManager.tags`, keyed by chat file name. The chat `.jsonl` files are never modified.
+- Tags live in extension, keyed by chat file name. The chat `.jsonl` files are never modified.
 
 ### 3. Past Chats UI overhaul
 Injected into the existing Manage Chat Files popup:
@@ -37,7 +37,7 @@ Injected into the existing Manage Chat Files popup:
 - Save an unlimited number of OpenAI-compatible API profiles. Each has a name, URL, key, and model.
 - Pick the active profile from a dropdown, or enable Rotate to cycle through them round-robin on every call (great for spreading naming/tagging traffic across keys, or for resilience if one profile is rate-limited).
 - Two request shapes:
-  - **Chat Completion** — sends the standard messages array with `{role:"system"}` + `{role:"user"}` (the Tavern style).
+  - **Chat Completion** — sends the standard messages array with `{role:"system"}` + `{role:"user"}.
   - **Text Completion** — concatenated single prompt for legacy `/completions` endpoints.
 - Existing single-config installs are auto-migrated to a profile on first load.
 

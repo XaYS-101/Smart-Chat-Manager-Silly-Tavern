@@ -161,7 +161,6 @@
     cursor: pointer;
     user-select: none;
     min-width: 0;
-    overflow: hidden;
 }
 
 .scm-folder-header:hover {
@@ -184,6 +183,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
 }
 
 .scm-folder-header .scm-folder-count {
@@ -296,24 +296,36 @@
 
     /* Folder bodies indent less on narrow screens */
     .scm-folder-body {
-        padding-left: 8px;
-        margin-left: 4px;
+        padding-left: 6px;
+        margin-left: 2px;
     }
 
     /* Nested folders: reduce indent further at 3+ levels */
     .scm-folder-body .scm-folder-body {
-        padding-left: 4px;
-        margin-left: 2px;
+        padding-left: 3px;
+        margin-left: 1px;
+    }
+
+    /* Tighter folder header so all controls fit on a phone-width row */
+    .scm-folder-header {
+        gap: 4px;
+        padding: 6px 6px;
+    }
+
+    /* Count badge is redundant info on phones — hide it to save horizontal space */
+    .scm-folder-header .scm-folder-count {
+        display: none;
     }
 
     /* Increase tap targets for folder action buttons */
     .scm-folder-header .scm-folder-act {
-        padding: 8px;
-        min-width: 32px;
-        min-height: 32px;
+        padding: 6px;
+        min-width: 28px;
+        min-height: 28px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        flex-shrink: 0;
     }
 
     /* Increase tap target for move button */

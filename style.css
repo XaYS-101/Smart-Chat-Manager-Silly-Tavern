@@ -160,6 +160,8 @@
     background: rgba(255, 255, 255, 0.05);
     cursor: pointer;
     user-select: none;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .scm-folder-header:hover {

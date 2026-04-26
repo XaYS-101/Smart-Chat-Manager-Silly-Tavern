@@ -20,6 +20,8 @@ Your chats get titles automatically after a configurable threshold (default: 6 m
 ### 2. Tagging system
 Tag your chats manually from the settings panel, or hit the **Auto-Tag** button and let the LLM suggest 3-5 keyword tags. Tags live in the extension settings (keyed by chat filename), so your original `.jsonl` files stay untouched.
 
+![](auto_tag.png)
+
 ### 3. Folder system
 Organize your chats into folders that show up as collapsible groups in the past-chats list:
 - **Nested folders:** Create subfolders inside folders. Go as deep as you want.

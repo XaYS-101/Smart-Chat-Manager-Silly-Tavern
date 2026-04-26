@@ -8,7 +8,7 @@ A SillyTavern extension that brings actual chat-management tools to a frontend t
 
 **Important:** Your chats are intended to be safe and won't be corrupred no matter what since every data that this extension makes (except renaming) would not touch your original chat and after deleting everything will return. (But still make backup)
 
-**Note:** This extension is actively developed and not perfect. Bugs can and will happen. If something breaks, check the browser console for errors and report issues with details. I will try to see what I can do about it.
+**Note:** This extension is not perfect. Bugs can and will happen. If something breaks, check the browser console for errors and report issues with details. I will try to see what I can do about it.
 
 ---
 
@@ -17,10 +17,14 @@ A SillyTavern extension that brings actual chat-management tools to a frontend t
 ### 1. Auto-naming chats
 Your chats get titles automatically after a configurable threshold (default: 6 messages). The LLM suggests a name that includes `{{char}}`, and you can accept or decline it via an optional confirmation modal. You can change what will be in name later if you want.
 
+![](images/auto_name.png)
+
 ### 2. Tagging system
 Tag your chats manually from the settings panel, or hit the **Auto-Tag** button and let the LLM suggest 3-5 keyword tags. Tags live in the extension settings (keyed by chat filename), so your original `.jsonl` files stay untouched.
 
-![](auto_tag.png)
+![](images/auto_tag.png)
+
+![](images/tags_in_history.png)
 
 ### 3. Folder system
 Organize your chats into folders that show up as collapsible groups in the past-chats list:
@@ -30,6 +34,8 @@ Organize your chats into folders that show up as collapsible groups in the past-
 - **Branch prompt:** When you create a branch, you'll get prompted to organize it. Options include moving it to the parent's folder, any ancestor folder, creating a new subfolder, or picking a different folder entirely.
 - **Subfolder creation:** Each folder header has a folder-plus icon. Click it to create a subfolder right there.
 
+![](images/new_chat_history.png)
+
 ### 4. Past Chats UI overhaul
 The extension injects new controls into ST's existing "Manage Chat Files" popup:
 - **Tag-search bar** — Type tag keywords (multi-term, AND logic) to filter chats.
@@ -37,6 +43,10 @@ The extension injects new controls into ST's existing "Manage Chat Files" popup:
 - **Folder groups** — Collapsible sections with expand/collapse toggles.
 - **Bulk selection mode** — Hit "Select" to toggle checkboxes on all chats, then use "Move selected (N)" to bulk-move them.
 - **New folder button** — Create top-level folders on the fly.
+
+![](images/landing.png)
+
+![](images/connection_deletion.png)
 
 ### 5. Prompt Library
 Manage your system prompts for renaming or tagging in one place:

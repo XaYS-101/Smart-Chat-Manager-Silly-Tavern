@@ -57,6 +57,12 @@ const MODULE_NAME = 'SmartChatManager';
 // Session-only state for bulk selection (not persisted to settings)
 let selectedChats = new Set();
 
+// Guards against the branch-folder prompt firing too often: while one prompt
+// is open, and while we are renaming a chat (which reloads it and emits a
+// spurious CHAT_CHANGED for the renamed branch).
+let branchPromptOpen = false;
+let renameInProgress = false;
+
 /* ------------------------------------------------------------------
  *  Settings panel HTML
  *
@@ -86,6 +92,20 @@ const SETTINGS_HTML = `
             <hr class="sysHR" />
 
             <div class="scm-section">
+                <h4 data-scm-i18n="features_header">Features</h4>
+                <label class="checkbox_label" for="scm_tags_enabled">
+                    <input id="scm_tags_enabled" type="checkbox" />
+                    <span data-scm-i18n="features_tags_enabled">Enable tags</span>
+                </label>
+                <label class="checkbox_label" for="scm_folders_enabled">
+                    <input id="scm_folders_enabled" type="checkbox" />
+                    <span data-scm-i18n="features_folders_enabled">Enable folders</span>
+                </label>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="scm-section">
                 <h4 data-scm-i18n="auto_name_header">Automatic Chat Naming</h4>
                 <label class="checkbox_label" for="scm_auto_name_enabled">
                     <input id="scm_auto_name_enabled" type="checkbox" />
@@ -107,7 +127,7 @@ const SETTINGS_HTML = `
 
             <hr class="sysHR" />
 
-            <div class="scm-section">
+            <div class="scm-section" id="scm_tag_section">
                 <h4 data-scm-i18n="tag_header">Tags for Current Chat</h4>
                 <div class="scm-current-tags-row">
                     <div id="scm_current_tags" class="scm-tag-list"></div>
@@ -262,6 +282,9 @@ Reply with ONLY a single line of comma-separated tags. No prose, no headers, no 
 const DEFAULT_SETTINGS = {
     language: 'en',
 
+    tagsEnabled: true,               // master switch for the tagging feature
+    foldersEnabled: true,            // master switch for the folder feature
+
     autoName: {
         enabled: true,
         threshold: 6,
@@ -304,6 +327,10 @@ const I18N = {
     en: {
         ext_title: 'Smart Chat Manager',
         language: 'Language',
+
+        features_header: 'Features',
+        features_tags_enabled: 'Enable tags',
+        features_folders_enabled: 'Enable folders',
 
         auto_name_header: 'Automatic Chat Naming',
         auto_name_enabled: 'Enable auto-naming',
@@ -427,6 +454,10 @@ const I18N = {
     ru: {
         ext_title: 'Smart Chat Manager (Умный менеджер чатов)',
         language: 'Язык',
+
+        features_header: 'Функции',
+        features_tags_enabled: 'Включить теги',
+        features_folders_enabled: 'Включить папки',
 
         auto_name_header: 'Автоматическое именование чатов',
         auto_name_enabled: 'Включить авто-именование',
@@ -578,6 +609,8 @@ function getSettings() {
     const s = extension_settings[MODULE_NAME];
 
     s.language ??= 'en';
+    s.tagsEnabled ??= true;
+    s.foldersEnabled ??= true;
     s.autoName ??= structuredClone(DEFAULT_SETTINGS.autoName);
     s.autoName.promptId ??= 'default_naming';
     s.autoTag ??= structuredClone(DEFAULT_SETTINGS.autoTag);
@@ -685,6 +718,18 @@ function getActiveCharacterName() {
     if (selected_group) return 'Group';
     const char = characters?.[this_chid];
     return char?.name || 'Character';
+}
+
+/**
+ * Stable identifier for the currently selected character or group.
+ * Folders are scoped to this key so they don't bleed across characters.
+ * Returns '' when nothing is selected (e.g. on the welcome screen).
+ */
+function getCurrentCharKey() {
+    if (selected_group) return `group:${selected_group}`;
+    const char = characters?.[this_chid];
+    if (char && char.avatar) return `char:${char.avatar}`;
+    return '';
 }
 
 function getUserName() {
@@ -934,12 +979,24 @@ async function runAutoName({ force = false } = {}) {
     }
 
     try {
+        // Carry the branch-prompted flag to the new key up front so the
+        // CHAT_CHANGED that renameChat emits on reload doesn't re-prompt.
+        const oldK = chatKey(oldFile);
+        const newK = chatKey(suggestion);
+        if (s.branchPromptedFor.includes(oldK) && !s.branchPromptedFor.includes(newK)) {
+            s.branchPromptedFor.push(newK);
+        }
+        renameInProgress = true;
         await renameChat(oldFile, suggestion);
         migrateChatKey(oldFile, suggestion);
         toastr.success(t('toast_renamed') + suggestion);
     } catch (err) {
         console.error(`[${MODULE_NAME}] rename failed`, err);
         toastr.error(t('toast_failed') + (err.message || err));
+    } finally {
+        // Clear after the current turn so any CHAT_CHANGED emitted during the
+        // reload is still suppressed, even if it fires a tick late.
+        setTimeout(() => { renameInProgress = false; }, 1500);
     }
 }
 
@@ -1040,6 +1097,9 @@ function createFolder(name, parentId = null) {
         id,
         name: String(name || '').trim() || 'Folder',
         parentId: (parentId && s.folders[parentId]) ? parentId : null,
+        // Bind to the active character/group. Sub-folders inherit the parent's
+        // owner (same active character at creation time).
+        charKey: (parentId && s.folders[parentId]) ? (s.folders[parentId].charKey || null) : getCurrentCharKey(),
         chats: [],
         collapsed: false,
     };
@@ -1087,6 +1147,33 @@ function moveChatToFolder(fileName, folderId) {
         delete s.chatFolder[k];
     }
     saveSettings();
+}
+
+function tagsEnabled() {
+    return getSettings().tagsEnabled !== false;
+}
+
+function foldersEnabled() {
+    return getSettings().foldersEnabled !== false;
+}
+
+/**
+ * Show/hide tag- and folder-dependent UI to match the feature toggles.
+ * Hides the Tags section in the settings drawer and rebuilds the
+ * past-chats toolbar/badges so disabled features disappear immediately.
+ */
+function applyFeatureVisibility() {
+    const tagSection = document.getElementById('scm_tag_section');
+    if (tagSection) tagSection.style.display = tagsEnabled() ? '' : 'none';
+
+    // Rebuild the past-chats popup UI if it is currently open.
+    document.getElementById('scm_pc_toolbar')?.remove();
+    const popup = document.getElementById('shadow_select_chat_popup');
+    if (popup && popup.style.display !== 'none') {
+        injectPastChatsToolbar();
+        refreshPastChatsBadges();
+        applyPastChatsFilterAndSort();
+    }
 }
 
 
@@ -1187,31 +1274,38 @@ function injectPastChatsToolbar() {
 
     const s = getSettings();
 
+    // Nothing to show if both features are off.
+    if (!tagsEnabled() && !foldersEnabled()) return;
+
+    const tagSearchHtml = tagsEnabled()
+        ? `<input type="search" id="scm_pc_tag_search" class="text_pole flex1"
+               placeholder="${escapeHtml(t('pc_search_placeholder'))}"
+               value="${escapeHtml(s.tagSearch)}" autocomplete="off" />`
+        : '';
+    const folderBtnsHtml = foldersEnabled()
+        ? `<input id="scm_select_toggle" class="menu_button" type="button"
+               value="${escapeHtml(t('select_toggle'))}" />
+           <input id="scm_move_selected" class="menu_button" type="button"
+               value="${escapeHtml(t('move_selected').replace('{n}', '0'))}"
+               style="display:none;" />
+           <input id="scm_pc_new_folder" class="menu_button" type="button"
+               value="${escapeHtml(t('folder_new'))}" />`
+        : '';
+
     const bar = document.createElement('div');
     bar.id = 'scm_pc_toolbar';
     bar.className = 'flex-container alignitemscenter flexGap10 wide100p';
-    bar.innerHTML = `
-        <input type="search" id="scm_pc_tag_search" class="text_pole flex1"
-               placeholder="${escapeHtml(t('pc_search_placeholder'))}"
-               value="${escapeHtml(s.tagSearch)}" autocomplete="off" />
-        <input id="scm_select_toggle" class="menu_button" type="button"
-               value="${escapeHtml(t('select_toggle'))}" />
-        <input id="scm_move_selected" class="menu_button" type="button"
-               value="${escapeHtml(t('move_selected').replace('{n}', '0'))}"
-               style="display:none;" />
-        <input id="scm_pc_new_folder" class="menu_button" type="button"
-               value="${escapeHtml(t('folder_new'))}" />
-    `;
+    bar.innerHTML = tagSearchHtml + folderBtnsHtml;
     header.parentElement.insertBefore(bar, header.nextSibling);
 
-    bar.querySelector('#scm_pc_tag_search').addEventListener('input', (e) => {
+    bar.querySelector('#scm_pc_tag_search')?.addEventListener('input', (e) => {
         s.tagSearch = e.target.value;
         saveSettings();
         applyPastChatsFilterAndSort();
     });
-    bar.querySelector('#scm_select_toggle').addEventListener('click', toggleSelectMode);
-    bar.querySelector('#scm_move_selected').addEventListener('click', openBulkMoveDialog);
-    bar.querySelector('#scm_pc_new_folder').addEventListener('click', async () => {
+    bar.querySelector('#scm_select_toggle')?.addEventListener('click', toggleSelectMode);
+    bar.querySelector('#scm_move_selected')?.addEventListener('click', openBulkMoveDialog);
+    bar.querySelector('#scm_pc_new_folder')?.addEventListener('click', async () => {
         const nm = await callGenericPopup(t('folder_name_prompt'), POPUP_TYPE.INPUT, '');
         if (typeof nm !== 'string' || !nm.trim()) return;
         createFolder(nm);
@@ -1304,7 +1398,10 @@ async function openBulkMoveDialog() {
 
 function refreshPastChatsBadges() {
     const list = document.getElementById('select_chat_div');
-    const isSelecting = list?.dataset.scmSelecting === '1';
+    const showFolders = foldersEnabled();
+    const showTags = tagsEnabled();
+    // Select mode only exists to bulk-move chats into folders.
+    const isSelecting = showFolders && list?.dataset.scmSelecting === '1';
 
     const blocks = document.querySelectorAll('#select_chat_div .select_chat_block');
     blocks.forEach((block) => {
@@ -1331,22 +1428,27 @@ function refreshPastChatsBadges() {
             checkbox.checked = selectedChats.has(fileName);
         }
 
-        const tags = getTags(fileName);
+        // Nothing to render in the badge row when both features are off.
+        if (!showFolders && !showTags) return;
+
+        const tags = showTags ? getTags(fileName) : [];
 
         const row = document.createElement('div');
         row.className = 'scm-badge-row';
 
         // Folder move button — always present, even with no tags.
-        const moveBtn = document.createElement('span');
-        moveBtn.className = 'scm-move-btn';
-        moveBtn.title = t('folder_move_title');
-        moveBtn.innerHTML = '<i class="fa-solid fa-folder-tree"></i>';
-        moveBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            openFolderPickerForChat(fileName).catch(err =>
-                console.error(`[${MODULE_NAME}] folder picker failed`, err));
-        });
-        row.appendChild(moveBtn);
+        if (showFolders) {
+            const moveBtn = document.createElement('span');
+            moveBtn.className = 'scm-move-btn';
+            moveBtn.title = t('folder_move_title');
+            moveBtn.innerHTML = '<i class="fa-solid fa-folder-tree"></i>';
+            moveBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openFolderPickerForChat(fileName).catch(err =>
+                    console.error(`[${MODULE_NAME}] folder picker failed`, err));
+            });
+            row.appendChild(moveBtn);
+        }
 
         for (const tag of tags) {
             const badge = document.createElement('span');
@@ -1369,7 +1471,8 @@ function applyPastChatsFilterAndSort() {
     const list = document.getElementById('select_chat_div');
     if (!list) return;
     const s = getSettings();
-    const query = s.tagSearch.trim().toLowerCase();
+    // When tags are disabled, ignore the stored search so nothing is filtered out.
+    const query = tagsEnabled() ? s.tagSearch.trim().toLowerCase() : '';
     const terms = query.split(/[\s,]+/).filter(Boolean);
 
     // Mark the whole pass as ours so the MutationObserver ignores all the
@@ -1407,8 +1510,11 @@ function applyPastChatsFilterAndSort() {
 }
 
 function applyFolderGrouping(visibleWrappers, list, isFiltering) {
+    if (!foldersEnabled()) return;
     const s = getSettings();
     if (Object.keys(s.folders).length === 0) return;
+
+    const currentKey = getCurrentCharKey();
 
     const buckets = new Map();
     for (const w of visibleWrappers) {
@@ -1421,13 +1527,38 @@ function applyFolderGrouping(visibleWrappers, list, isFiltering) {
         }
     }
 
+    migrateLegacyFolders(s, buckets, currentKey);
+
     const frag = document.createDocumentFragment();
-    renderFolderTree(frag, null, s, buckets, isFiltering);
+    renderFolderTree(frag, null, s, buckets, isFiltering, currentKey);
     // Folder groups go above ungrouped chats (which remain in document order).
     list.insertBefore(frag, list.firstChild);
 }
 
-function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, visited = new Set()) {
+/**
+ * Bind folders created before per-character scoping existed (no `charKey`) to a
+ * character. A legacy folder is claimed by the current character if it holds one
+ * of that character's chats, or if it is empty (no way to infer an owner, so it
+ * lands on whichever character is open first). Folders that contain only other
+ * characters' chats are left untouched until that character is opened.
+ */
+function migrateLegacyFolders(s, buckets, currentKey) {
+    if (!currentKey) return;
+    let changed = false;
+    for (const id of Object.keys(s.folders)) {
+        const f = s.folders[id];
+        if (f.charKey) continue;
+        const hasCurrentChats = (buckets.get(id) || []).length > 0;
+        const isEmpty = !Array.isArray(f.chats) || f.chats.length === 0;
+        if (hasCurrentChats || isEmpty) {
+            f.charKey = currentKey;
+            changed = true;
+        }
+    }
+    if (changed) saveSettings();
+}
+
+function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, currentKey, visited = new Set()) {
     // Cycle guard: if we've already visited this parentId in the current
     // recursion path, bail to prevent infinite loops from corrupted parentId
     // chains (e.g., A.parentId=B, B.parentId=A).
@@ -1436,6 +1567,7 @@ function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, visited =
 
     const children = Object.keys(s.folders)
         .filter(id => (s.folders[id].parentId || null) === parentId)
+        .filter(id => (s.folders[id].charKey || null) === (currentKey || null))
         .sort((a, b) => s.folders[a].name.localeCompare(s.folders[b].name));
 
     for (const fid of children) {
@@ -1454,7 +1586,7 @@ function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, visited =
         if (folder.collapsed) body.hidden = true;
 
         // Sub-folders first, then this folder\'s own chats.
-        renderFolderTree(body, fid, s, buckets, isFiltering, new Set(visited));
+        renderFolderTree(body, fid, s, buckets, isFiltering, currentKey, new Set(visited));
         for (const w of members) body.appendChild(w);
 
         group.appendChild(header);
@@ -1477,12 +1609,14 @@ function subtreeHasVisibleChats(folderId, s, buckets, visited) {
 
 function buildFolderTreeOptions(s, currentFid) {
     const lines = [];
+    const currentKey = getCurrentCharKey();
     const visited = new Set();
     const visit = (parentId, depth) => {
         if (visited.has(parentId)) return;
         visited.add(parentId);
         const children = Object.keys(s.folders)
             .filter(id => (s.folders[id].parentId || null) === parentId)
+            .filter(id => (s.folders[id].charKey || null) === (currentKey || null))
             .sort((a, b) => s.folders[a].name.localeCompare(s.folders[b].name));
         for (const id of children) {
             const indent = '    '.repeat(depth);
@@ -1948,6 +2082,25 @@ function bindSettingsPanel() {
         }
     });
 
+    // Feature toggles
+    const tagsEnabled = document.getElementById('scm_tags_enabled');
+    tagsEnabled.checked = s.tagsEnabled !== false;
+    tagsEnabled.addEventListener('change', (e) => {
+        s.tagsEnabled = e.target.checked;
+        saveSettings();
+        applyFeatureVisibility();
+    });
+
+    const foldersEnabled = document.getElementById('scm_folders_enabled');
+    foldersEnabled.checked = s.foldersEnabled !== false;
+    foldersEnabled.addEventListener('change', (e) => {
+        s.foldersEnabled = e.target.checked;
+        saveSettings();
+        applyFeatureVisibility();
+    });
+
+    applyFeatureVisibility();
+
     // Auto-name
     const enabled = document.getElementById('scm_auto_name_enabled');
     enabled.checked = !!s.autoName.enabled;
@@ -2105,8 +2258,21 @@ function onChatChanged() {
         console.error(`[${MODULE_NAME}] branch folder prompt failed`, err));
 }
 
+function markBranchPrompted(s, branchK) {
+    if (s.branchPromptedFor.includes(branchK)) return;
+    s.branchPromptedFor.push(branchK);
+    if (s.branchPromptedFor.length > 500) {
+        s.branchPromptedFor.splice(0, s.branchPromptedFor.length - 500);
+    }
+    flushSettings(); // non-debounced so it persists before the next event
+}
+
 async function maybePromptBranchFolder() {
     const s = getSettings();
+    if (!s.foldersEnabled) return;      // feature disabled
+    if (renameInProgress) return;       // our own rename reloaded the chat
+    if (branchPromptOpen) return;       // a prompt is already on screen
+
     const branchName = getCurrentChatId();
     if (!branchName) return;
 
@@ -2121,17 +2287,21 @@ async function maybePromptBranchFolder() {
     if (s.branchPromptedFor.includes(branchK)) return;
     if (s.chatFolder[branchK]) return; // already organized
 
+    // Record up front so re-entering this branch (or a stray CHAT_CHANGED)
+    // never re-opens the prompt, even if the user dismisses it.
+    markBranchPrompted(s, branchK);
+
     const parentFolderId = s.chatFolder[parentK];
     const parentFolder = parentFolderId && s.folders[parentFolderId] ? s.folders[parentFolderId] : null;
-    const choice = await promptBranchFolderChoice(parentK, parentFolder);
-    if (!choice) return; // user cancelled — don't mark as prompted, so they'll be asked again next time
 
-    // Mark as handled AFTER user makes a choice (not on cancel).
-    s.branchPromptedFor.push(branchK);
-    if (s.branchPromptedFor.length > 500) {
-        s.branchPromptedFor.splice(0, s.branchPromptedFor.length - 500);
+    branchPromptOpen = true;
+    let choice;
+    try {
+        choice = await promptBranchFolderChoice(parentK, parentFolder);
+    } finally {
+        branchPromptOpen = false;
     }
-    flushSettings(); // Use non-debounced save so it persists immediately
+    if (!choice) return; // dismissed — already recorded, won't ask again
 
     if (choice.action === 'none') return;
 

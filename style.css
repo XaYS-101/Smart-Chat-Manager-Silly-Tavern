@@ -146,8 +146,19 @@
 }
 
 /* ====================== Folders in past-chats list ====================== */
+/* Pin the past-chats list to the popup width. On mobile SillyTavern sets
+   #select_chat_popup { align-items: start; max-width: unset }, which sizes the
+   list to its content — so a long folder/chat name with no spaces has no width
+   to truncate against and widens the popup, forcing horizontal scroll. Forcing
+   a definite width gives text-overflow:ellipsis a boundary to clip against. */
+#select_chat_div {
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .scm-folder-group {
     margin: 4px 0 6px;
+    min-width: 0;
 }
 
 .scm-folder-header {
@@ -161,6 +172,7 @@
     cursor: pointer;
     user-select: none;
     min-width: 0;
+    overflow: hidden;
 }
 
 .scm-folder-header:hover {
@@ -171,10 +183,12 @@
     width: 14px;
     text-align: center;
     opacity: 0.75;
+    flex-shrink: 0;
 }
 
 .scm-folder-header .fa-folder {
     opacity: 0.85;
+    flex-shrink: 0;
 }
 
 .scm-folder-header .scm-folder-name {
@@ -189,11 +203,14 @@
 .scm-folder-header .scm-folder-count {
     opacity: 0.6;
     font-size: 0.85em;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .scm-folder-header .scm-folder-act {
     opacity: 0.5;
     padding: 0 4px;
+    flex-shrink: 0;
 }
 
 .scm-folder-header .scm-folder-act:hover {

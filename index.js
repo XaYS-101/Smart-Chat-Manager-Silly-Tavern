@@ -1646,6 +1646,7 @@ function buildFolderHeader(folder, visibleCount) {
     const name = document.createElement('span');
     name.className = 'scm-folder-name';
     name.textContent = folder.name;
+    name.title = folder.name; // full name on hover, since long names are clipped
     h.appendChild(name);
 
     const cnt = document.createElement('span');

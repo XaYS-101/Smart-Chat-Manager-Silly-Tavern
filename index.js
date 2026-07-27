@@ -63,6 +63,12 @@ let selectedChats = new Set();
 let branchPromptOpen = false;
 let renameInProgress = false;
 
+// Auto-naming guards: one naming run at a time (message events fire in bursts),
+// and a session-only blacklist of chats whose naming request already failed so a
+// broken endpoint doesn't fire a request per message. A manual run clears it.
+let autoNameInFlight = false;
+const autoNameFailed = new Set();
+
 /* ------------------------------------------------------------------
  *  Settings panel HTML
  *
@@ -280,7 +286,7 @@ Reply with ONLY a single line of comma-separated tags. No prose, no headers, no 
 });
 
 const DEFAULT_SETTINGS = {
-    language: 'en',
+    language: 'ru',
 
     tagsEnabled: true,               // master switch for the tagging feature
     foldersEnabled: true,            // master switch for the folder feature
@@ -442,9 +448,12 @@ const I18N = {
         toast_done: 'Done.',
         toast_failed: 'Smart Chat Manager request failed: ',
         toast_renamed: 'Chat renamed to: ',
+        toast_rename_failed: 'The chat was not renamed, name kept.',
         toast_kept: 'Suggestion declined, name kept.',
+        err_timeout: 'The custom endpoint did not respond within 30 seconds.',
         toast_no_profile: 'No custom API profile is configured.',
         toast_saved: 'Saved.',
+        warn_http_key: 'This URL uses http://, so the API key will be sent unencrypted. Fine on your own LAN, risky over the internet.',
 
         modal_title: 'Suggested Chat Title',
         modal_text: 'The LLM proposes the following title for this chat:',
@@ -569,9 +578,12 @@ const I18N = {
         toast_done: 'Готово.',
         toast_failed: 'Ошибка Smart Chat Manager: ',
         toast_renamed: 'Чат переименован: ',
+        toast_rename_failed: 'Чат не был переименован, имя сохранено.',
         toast_kept: 'Предложение отклонено, имя сохранено.',
+        err_timeout: 'Пользовательский эндпоинт не ответил за 30 секунд.',
         toast_no_profile: 'Не настроен ни один профиль API.',
         toast_saved: 'Сохранено.',
+        warn_http_key: 'URL использует http://, поэтому ключ API будет отправлен без шифрования. Для локальной сети это нормально, через интернет — небезопасно.',
 
         modal_title: 'Предложенное имя чата',
         modal_text: 'LLM предлагает следующее имя:',
@@ -581,7 +593,7 @@ const I18N = {
 };
 
 function t(key) {
-    const lang = (extension_settings[MODULE_NAME] || {}).language || 'en';
+    const lang = (extension_settings[MODULE_NAME] || {}).language || DEFAULT_SETTINGS.language;
     return (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
 }
 
@@ -608,7 +620,7 @@ function getSettings() {
     }
     const s = extension_settings[MODULE_NAME];
 
-    s.language ??= 'en';
+    s.language ??= DEFAULT_SETTINGS.language;
     s.tagsEnabled ??= true;
     s.foldersEnabled ??= true;
     s.autoName ??= structuredClone(DEFAULT_SETTINGS.autoName);
@@ -624,12 +636,33 @@ function getSettings() {
     s.chatFolder ??= {};
     s.branchPromptedFor ??= [];
 
-    // One-time migration: re-key tags / autoNamed entries that were stored
-    // with a trailing `.jsonl` (a leftover from when refreshPastChatsBadges
-    // looked up keys by the past-chats template's filename attribute).
+    s.prompts ??= {};
+
+    s.api ??= structuredClone(DEFAULT_SETTINGS.api);
+    s.api.source ??= 'st';
+    s.api.completionMode ??= 'chat';
+    s.api.rotate ??= false;
+    s.api.rotateIndex ??= 0;
+    s.api.profiles ??= [];
+    s.api.activeProfileId ??= null;
+
+    return s;
+}
+
+/**
+ * One-time upgrades of stored data. Called once at init, before anything else
+ * reads the settings. getSettings() is on the hot path of every render pass
+ * (it runs per chat block), so it must never walk stored records itself.
+ */
+function migrateSettings() {
+    const s = getSettings();
+
+    // Re-key tags / autoNamed entries that were stored with a trailing
+    // `.jsonl` (a leftover from when refreshPastChatsBadges looked up keys by
+    // the past-chats template's filename attribute).
     let migrated = false;
     for (const k of Object.keys(s.tags)) {
-        const norm = chatKey(k);
+        const norm = bareChatKey(k);
         if (norm !== k) {
             s.tags[norm] = Array.from(new Set([...(s.tags[norm] || []), ...s.tags[k]]));
             delete s.tags[k];
@@ -637,7 +670,7 @@ function getSettings() {
         }
     }
     for (const k of Object.keys(s.autoNamed)) {
-        const norm = chatKey(k);
+        const norm = bareChatKey(k);
         if (norm !== k) {
             s.autoNamed[norm] = s.autoNamed[norm] || s.autoNamed[k];
             delete s.autoNamed[k];
@@ -661,7 +694,6 @@ function getSettings() {
     }
 
     // Prompts: ensure built-ins exist; preserve user edits to them.
-    s.prompts ??= {};
     for (const id of Object.keys(DEFAULT_PROMPTS)) {
         if (!s.prompts[id]) {
             s.prompts[id] = { ...DEFAULT_PROMPTS[id] };
@@ -675,14 +707,6 @@ function getSettings() {
     }
 
     // API: migrate legacy single-config to the new profiles list.
-    s.api ??= structuredClone(DEFAULT_SETTINGS.api);
-    s.api.source ??= 'st';
-    s.api.completionMode ??= 'chat';
-    s.api.rotate ??= false;
-    s.api.rotateIndex ??= 0;
-    s.api.profiles ??= [];
-    s.api.activeProfileId ??= null;
-
     if ((s.api.url || s.api.key || s.api.model) && s.api.profiles.length === 0) {
         const id = uid();
         s.api.profiles.push({
@@ -846,9 +870,10 @@ async function generateST({ systemPrompt, userMessage, maxTokens }) {
  *  - chat: messages array with system + user roles.
  *  - text: legacy /completions style with a single prompt.
  *
- * URL handling: a base URL like "https://api.openai.com/v1" gets
- * the appropriate suffix appended; a fully-qualified endpoint URL
- * is used as-is.
+ * URL handling: a URL that already ends with the endpoint of the
+ * current mode is used as-is; anything else (a bare base like
+ * "https://api.openai.com/v1", or the other mode's endpoint) is
+ * reduced to its base and gets this mode's suffix appended.
  */
 async function generateCustom({ profile, systemPrompt, userMessage, maxTokens, mode }) {
     if (!profile.url || !profile.model) {
@@ -859,10 +884,13 @@ async function generateCustom({ profile, systemPrompt, userMessage, maxTokens, m
     if (profile.key) headers['Authorization'] = `Bearer ${profile.key}`;
 
     const base = profile.url.replace(/\/+$/, '');
+    // Strip whichever completions endpoint is already there, then append the
+    // one this mode needs — so a URL only stays untouched if it matches the mode.
+    const root = base.replace(/\/(chat\/)?completions$/, '');
     let url, body;
 
     if (mode === 'text') {
-        url = /\/(completions|chat\/completions)$/.test(base) ? base : `${base}/completions`;
+        url = `${root}/completions`;
         body = {
             model: profile.model,
             max_tokens: maxTokens,
@@ -870,7 +898,7 @@ async function generateCustom({ profile, systemPrompt, userMessage, maxTokens, m
             prompt: `${systemPrompt}\n\n---\n\n${userMessage}\n\n---\n\nResponse:`,
         };
     } else {
-        url = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+        url = `${root}/chat/completions`;
         body = {
             model: profile.model,
             max_tokens: maxTokens,
@@ -882,7 +910,21 @@ async function generateCustom({ profile, systemPrompt, userMessage, maxTokens, m
         };
     }
 
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    let resp;
+    try {
+        // Without a deadline a hung endpoint keeps a naming run alive forever.
+        resp = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(30000),
+        });
+    } catch (err) {
+        if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+            throw new Error(t('err_timeout'));
+        }
+        throw err;
+    }
     if (!resp.ok) {
         const errText = await resp.text().catch(() => resp.statusText);
         throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
@@ -942,71 +984,230 @@ async function confirmRename(suggestion) {
 }
 
 async function runAutoName({ force = false } = {}) {
-    const s = getSettings();
-    const oldFile = getCurrentChatId();
-    if (!oldFile) {
-        toastr.info(t('toast_no_chat'));
-        return;
-    }
-    if (!force && s.autoNamed[oldFile]) return;
-    if (!force && !s.autoName.enabled) return;
-
-    toastr.info(t('toast_naming'));
-    let suggestion;
+    // The send and receive events of one turn would otherwise start two runs.
+    if (autoNameInFlight) return;
+    autoNameInFlight = true;
     try {
-        suggestion = await suggestChatName();
-    } catch (err) {
-        console.error(`[${MODULE_NAME}] naming failed`, err);
-        toastr.error(t('toast_failed') + (err.message || err));
-        return;
-    }
+        const s = getSettings();
+        const oldFile = getCurrentChatId();
+        if (!oldFile) {
+            toastr.info(t('toast_no_chat'));
+            return;
+        }
+        const oldK = resolveChatKey(oldFile, s);
+        if (!force && s.autoNamed[oldK]) return;
+        if (!force && !s.autoName.enabled) return;
+        if (!force && autoNameFailed.has(oldK)) return;
+        if (force) autoNameFailed.delete(oldK);
 
-    if (!suggestion) {
-        toastr.warning(t('toast_failed') + 'empty response');
-        return;
-    }
+        toastr.info(t('toast_naming'));
+        let suggestion;
+        try {
+            suggestion = await suggestChatName();
+        } catch (err) {
+            console.error(`[${MODULE_NAME}] naming failed`, err);
+            autoNameFailed.add(oldK);
+            toastr.error(t('toast_failed') + (err.message || err));
+            return;
+        }
 
-    const accept = (force || s.autoName.confirm)
-        ? await confirmRename(suggestion)
-        : true;
+        if (!suggestion) {
+            autoNameFailed.add(oldK);
+            toastr.warning(t('toast_failed') + 'empty response');
+            return;
+        }
 
-    s.autoNamed[oldFile] = true;
-    saveSettings();
+        const accept = (force || s.autoName.confirm)
+            ? await confirmRename(suggestion)
+            : true;
 
-    if (!accept) {
-        toastr.info(t('toast_kept'));
-        return;
-    }
+        if (!accept) {
+            // Declining an automatic suggestion means "don't ask again"; declining
+            // a manually requested one must not disable auto-naming for the chat.
+            if (!force) {
+                s.autoNamed[oldK] = true;
+                saveSettings();
+            }
+            toastr.info(t('toast_kept'));
+            return;
+        }
 
-    try {
         // Carry the branch-prompted flag to the new key up front so the
         // CHAT_CHANGED that renameChat emits on reload doesn't re-prompt.
-        const oldK = chatKey(oldFile);
-        const newK = chatKey(suggestion);
-        if (s.branchPromptedFor.includes(oldK) && !s.branchPromptedFor.includes(newK)) {
-            s.branchPromptedFor.push(newK);
-        }
+        const guessK = chatKey(suggestion);
+        const carried = s.branchPromptedFor.includes(oldK) && !s.branchPromptedFor.includes(guessK);
+        if (carried) s.branchPromptedFor.push(guessK);
+
         renameInProgress = true;
-        await renameChat(oldFile, suggestion);
-        migrateChatKey(oldFile, suggestion);
-        toastr.success(t('toast_renamed') + suggestion);
-    } catch (err) {
-        console.error(`[${MODULE_NAME}] rename failed`, err);
-        toastr.error(t('toast_failed') + (err.message || err));
+        let newFile = oldFile;
+        try {
+            await renameChat(oldFile, suggestion);
+            newFile = getCurrentChatId() || oldFile;
+        } catch (err) {
+            // ST handles its own rename errors, so this is only a last resort.
+            console.error(`[${MODULE_NAME}] rename failed`, err);
+        } finally {
+            // Clear after the current turn so any CHAT_CHANGED emitted during the
+            // reload is still suppressed, even if it fires a tick late.
+            setTimeout(() => { renameInProgress = false; }, 1500);
+        }
+
+        // renameChat resolves even when it did nothing (name equal ignoring case
+        // and accents, or a swallowed network error), so the chat id is the only
+        // reliable evidence, and it also reveals a server-sanitized name.
+        const newK = chatKey(newFile);
+        if (newK === oldK) {
+            if (carried) dropBranchPrompted(s, guessK);
+            autoNameFailed.add(oldK);
+            saveSettings();
+            toastr.warning(t('toast_rename_failed'));
+            return;
+        }
+
+        if (carried && newK !== guessK) {
+            dropBranchPrompted(s, guessK);
+            if (!s.branchPromptedFor.includes(newK)) s.branchPromptedFor.push(newK);
+        }
+        migrateChatKey(oldFile, newFile);
+        s.autoNamed[newK] = true;
+        saveSettings();
+        toastr.success(t('toast_renamed') + bareChatKey(newFile));
     } finally {
-        // Clear after the current turn so any CHAT_CHANGED emitted during the
-        // reload is still suppressed, even if it fires a tick late.
-        setTimeout(() => { renameInProgress = false; }, 1500);
+        autoNameInFlight = false;
     }
+}
+
+function dropBranchPrompted(s, key) {
+    const i = s.branchPromptedFor.indexOf(key);
+    if (i !== -1) s.branchPromptedFor.splice(i, 1);
 }
 
 /* ------------------------------------------------------------------
  *  Tagging
  * ------------------------------------------------------------------ */
 
-function chatKey(name) {
+/** Chat file name without its extension. Used for display and legacy lookups. */
+function bareChatKey(name) {
     if (!name) return '';
     return String(name).replace(/\.jsonl$/i, '');
+}
+
+/**
+ * Per-chat records are keyed by `${charKey}::${bareName}` so that same-named
+ * chats of different characters (a very common case — ST derives the default
+ * name from a timestamp) don't share tags, folders or the auto-named flag.
+ * The character part is the same representation the folders feature uses.
+ */
+function chatKey(name) {
+    const bare = bareChatKey(name);
+    if (!bare) return '';
+    return `${getCurrentCharKey()}::${bare}`;
+}
+
+/**
+ * Records written before per-character keying used the bare file name, and the
+ * bare key alone doesn't say which character owned it. So instead of a one-shot
+ * migration they are adopted on first read: whichever character is open when
+ * the record is looked up claims it. Returns true if anything moved.
+ */
+function adoptLegacyChatRecords(s, bareK, k) {
+    let changed = false;
+
+    if (s.tags[k] === undefined && Array.isArray(s.tags[bareK])) {
+        s.tags[k] = s.tags[bareK];
+        delete s.tags[bareK];
+        changed = true;
+    }
+
+    if (s.autoNamed[k] === undefined && s.autoNamed[bareK] !== undefined) {
+        s.autoNamed[k] = s.autoNamed[bareK];
+        delete s.autoNamed[bareK];
+        changed = true;
+    }
+
+    if (s.chatFolder[k] === undefined && s.chatFolder[bareK] !== undefined) {
+        const fid = s.chatFolder[bareK];
+        s.chatFolder[k] = fid;
+        delete s.chatFolder[bareK];
+        // The folder's own membership list carries the legacy key too.
+        const f = s.folders[fid];
+        if (f && Array.isArray(f.chats)) {
+            f.chats = Array.from(new Set(f.chats.map(c => c === bareK ? k : c)));
+        }
+        changed = true;
+    }
+
+    const i = s.branchPromptedFor.indexOf(bareK);
+    if (i !== -1) {
+        s.branchPromptedFor.splice(i, 1);
+        if (!s.branchPromptedFor.includes(k)) s.branchPromptedFor.push(k);
+        changed = true;
+    }
+
+    if (changed) saveSettings();
+    return changed;
+}
+
+/**
+ * Composite key for a chat file, adopting any legacy bare-key records first.
+ * Every read or write of s.tags / s.chatFolder / s.autoNamed /
+ * s.branchPromptedFor should go through this rather than chatKey().
+ */
+function resolveChatKey(fileName, s = getSettings()) {
+    const bare = bareChatKey(fileName);
+    if (!bare) return '';
+    const charKey = getCurrentCharKey();
+    const k = `${charKey}::${bare}`;
+    // With no character selected there is nobody to hand the record to, so a
+    // legacy key is left alone until a real character claims it.
+    if (charKey) adoptLegacyChatRecords(s, bare, k);
+    return k;
+}
+
+/**
+ * Drop every stored record of a chat: tags, folder membership, the auto-named
+ * flag and branch-prompt tracking. Mirrors migrateChatKey, which knows the same
+ * set of structures. Does not persist — the caller decides when to save.
+ */
+function purgeChatRecords(key) {
+    if (!key) return false;
+    const s = getSettings();
+    let changed = false;
+
+    if (key in s.tags) {
+        delete s.tags[key];
+        changed = true;
+    }
+
+    if (key in s.autoNamed) {
+        delete s.autoNamed[key];
+        changed = true;
+    }
+
+    if (key in s.chatFolder) {
+        delete s.chatFolder[key];
+        changed = true;
+    }
+
+    // Sweep every folder, not just s.chatFolder[key]'s: a stale membership
+    // entry can outlive the mapping (e.g. after a half-finished move).
+    for (const id of Object.keys(s.folders)) {
+        const f = s.folders[id];
+        if (!Array.isArray(f.chats)) continue;
+        const kept = f.chats.filter(c => c !== key);
+        if (kept.length !== f.chats.length) {
+            f.chats = kept;
+            changed = true;
+        }
+    }
+
+    let i;
+    while ((i = s.branchPromptedFor.indexOf(key)) !== -1) {
+        s.branchPromptedFor.splice(i, 1);
+        changed = true;
+    }
+
+    return changed;
 }
 
 /**
@@ -1016,7 +1217,7 @@ function chatKey(name) {
  */
 function migrateChatKey(oldName, newName) {
     const s = getSettings();
-    const oldK = chatKey(oldName);
+    const oldK = resolveChatKey(oldName, s);
     const newK = chatKey(newName);
     if (!oldK || !newK || oldK === newK) return;
 
@@ -1048,15 +1249,16 @@ function migrateChatKey(oldName, newName) {
     saveSettings();
 }
 
-function getTags(fileName) {
-    const s = getSettings();
-    const k = chatKey(fileName);
+// `s` is optional so render passes can hand down the settings they already
+// fetched instead of re-fetching one per chat block.
+function getTags(fileName, s = getSettings()) {
+    const k = resolveChatKey(fileName, s);
     return Array.isArray(s.tags[k]) ? s.tags[k] : [];
 }
 
 function setTags(fileName, tags) {
     const s = getSettings();
-    const k = chatKey(fileName);
+    const k = resolveChatKey(fileName, s);
     if (!k) return;
     const cleaned = Array.from(new Set(
         (tags || [])
@@ -1134,7 +1336,7 @@ function deleteFolder(folderId) {
 
 function moveChatToFolder(fileName, folderId) {
     const s = getSettings();
-    const k = chatKey(fileName);
+    const k = resolveChatKey(fileName, s);
     if (!k) return;
     const oldId = s.chatFolder[k];
     if (oldId && s.folders[oldId]) {
@@ -1166,10 +1368,11 @@ function applyFeatureVisibility() {
     const tagSection = document.getElementById('scm_tag_section');
     if (tagSection) tagSection.style.display = tagsEnabled() ? '' : 'none';
 
-    // Rebuild the past-chats popup UI if it is currently open.
+    // Rebuild the past-chats popup UI if it is currently open. The popup is
+    // hidden by the stylesheet, not by an inline style, so before its first
+    // open `.style.display` is empty — only the computed value is reliable.
     document.getElementById('scm_pc_toolbar')?.remove();
-    const popup = document.getElementById('shadow_select_chat_popup');
-    if (popup && popup.style.display !== 'none') {
+    if (isPastChatsPopupOpen()) {
         injectPastChatsToolbar();
         refreshPastChatsBadges();
         applyPastChatsFilterAndSort();
@@ -1313,33 +1516,49 @@ function injectPastChatsToolbar() {
     });
 }
 
+function exitSelectMode() {
+    const list = document.getElementById('select_chat_div');
+    const btn = document.getElementById('scm_select_toggle');
+    if (!list || !btn) return;
+
+    delete list.dataset.scmSelecting;
+    btn.value = t('select_toggle');
+    selectedChats.clear();
+    const moveBtn = document.getElementById('scm_move_selected');
+    if (moveBtn) moveBtn.style.display = 'none';
+
+    refreshPastChatsBadges();
+}
+
 function toggleSelectMode() {
     const list = document.getElementById('select_chat_div');
     const btn = document.getElementById('scm_select_toggle');
     if (!list || !btn) return;
 
-    const isActive = list.dataset.scmSelecting === '1';
-
-    if (isActive) {
-        // Exit select mode
-        delete list.dataset.scmSelecting;
-        btn.value = t('select_toggle');
-        selectedChats.clear();
-        document.getElementById('scm_move_selected').style.display = 'none';
-    } else {
-        // Enter select mode
-        list.dataset.scmSelecting = '1';
-        btn.value = t('select_toggle_active');
+    if (list.dataset.scmSelecting === '1') {
+        exitSelectMode();
+        return;
     }
+
+    // Enter select mode
+    list.dataset.scmSelecting = '1';
+    btn.value = t('select_toggle_active');
 
     refreshPastChatsBadges();
 }
 
-function updateBulkMoveButton() {
-    const checkboxes = document.querySelectorAll('.scm-select-checkbox:checked');
-    selectedChats.clear();
-    checkboxes.forEach(cb => selectedChats.add(cb.dataset.fileName));
+// The DOM is never the source of truth for the selection: ST empties and
+// re-renders #select_chat_div on every past-chats search, so anything read back
+// from the checkboxes would silently drop chats the query filtered out.
+function onSelectCheckboxChange(e) {
+    const fileName = e.target.dataset.fileName;
+    if (!fileName) return;
+    if (e.target.checked) selectedChats.add(fileName);
+    else selectedChats.delete(fileName);
+    updateBulkMoveButton();
+}
 
+function updateBulkMoveButton() {
     const btn = document.getElementById('scm_move_selected');
     if (!btn) return;
 
@@ -1381,23 +1600,31 @@ async function openBulkMoveDialog() {
 
     if (chosen === '__new__') {
         const nm = await callGenericPopup(t('folder_name_prompt'), POPUP_TYPE.INPUT, '');
-        if (typeof nm !== 'string' || !nm.trim()) return;
+        if (typeof nm !== 'string' || !nm.trim()) {
+            // Backing out of the name dialog would otherwise leave select mode
+            // on, with the checkboxes and the button count still showing.
+            exitSelectMode();
+            applyPastChatsFilterAndSort();
+            return;
+        }
         chosen = createFolder(nm);
     }
 
-    // Move all selected chats
+    // Counted before the move: exiting select mode clears the set.
+    const n = selectedChats.size;
     for (const fileName of selectedChats) {
         moveChatToFolder(fileName, chosen || null);
     }
 
     // Exit select mode and refresh
-    toggleSelectMode();
+    exitSelectMode();
     applyPastChatsFilterAndSort();
-    toastr.success(t('bulk_move_done').replace('{n}', selectedChats.size));
+    toastr.success(t('bulk_move_done').replace('{n}', n));
 }
 
 function refreshPastChatsBadges() {
     const list = document.getElementById('select_chat_div');
+    const s = getSettings();
     const showFolders = foldersEnabled();
     const showTags = tagsEnabled();
     // Select mode only exists to bulk-move chats into folders.
@@ -1413,25 +1640,25 @@ function refreshPastChatsBadges() {
 
         // Inject or remove checkbox based on select mode
         let checkbox = wrapper.querySelector('.scm-select-checkbox');
-        if (isSelecting && !checkbox) {
-            checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'scm-select-checkbox';
-            checkbox.dataset.fileName = fileName;
+        if (isSelecting) {
+            if (!checkbox) {
+                checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'scm-select-checkbox';
+                checkbox.dataset.fileName = fileName;
+                checkbox.addEventListener('change', onSelectCheckboxChange);
+                wrapper.insertBefore(checkbox, wrapper.firstChild);
+            }
+            // Always restore from the session set, never the other way round.
             checkbox.checked = selectedChats.has(fileName);
-            checkbox.addEventListener('change', updateBulkMoveButton);
-            wrapper.insertBefore(checkbox, wrapper.firstChild);
-        } else if (!isSelecting && checkbox) {
+        } else if (checkbox) {
             checkbox.remove();
-        } else if (isSelecting && checkbox) {
-            // Update checked state if selection persists
-            checkbox.checked = selectedChats.has(fileName);
         }
 
         // Nothing to render in the badge row when both features are off.
         if (!showFolders && !showTags) return;
 
-        const tags = showTags ? getTags(fileName) : [];
+        const tags = showTags ? getTags(fileName, s) : [];
 
         const row = document.createElement('div');
         row.className = 'scm-badge-row';
@@ -1465,6 +1692,10 @@ function refreshPastChatsBadges() {
             block.appendChild(row);
         }
     });
+
+    // Chats selected before a search may no longer be on screen, so the count
+    // has to come from the set rather than from what was just rendered.
+    if (isSelecting) updateBulkMoveButton();
 }
 
 function applyPastChatsFilterAndSort() {
@@ -1475,38 +1706,32 @@ function applyPastChatsFilterAndSort() {
     const query = tagsEnabled() ? s.tagSearch.trim().toLowerCase() : '';
     const terms = query.split(/[\s,]+/).filter(Boolean);
 
-    // Mark the whole pass as ours so the MutationObserver ignores all the
-    // DOM churn from teardown + re-render. Without this, the teardown phase
-    // would loop the observer at 60fps via requestAnimationFrame.
-    list.dataset.scmRendering = '1';
-    try {
-        // Tear down any prior folder scaffolding so we can re-flatten the list.
-        list.querySelectorAll('.scm-folder-group').forEach(group => {
-            const body = group.querySelector('.scm-folder-body');
-            if (body) {
-                while (body.firstChild) list.appendChild(body.firstChild);
-            }
-            group.remove();
-        });
+    // The DOM churn below is watched by the list MutationObserver, which
+    // detaches itself around its own scheduled passes (startPastChatsObserver).
+    // Tear down any prior folder scaffolding so we can re-flatten the list.
+    list.querySelectorAll('.scm-folder-group').forEach(group => {
+        const body = group.querySelector('.scm-folder-body');
+        if (body) {
+            while (body.firstChild) list.appendChild(body.firstChild);
+        }
+        group.remove();
+    });
 
-        const wrappers = Array.from(list.querySelectorAll('.select_chat_block_wrapper'));
-        wrappers.forEach((w) => {
-            const fileName = w.querySelector('.select_chat_block')?.getAttribute('file_name') || '';
-            const tags = getTags(fileName);
-            const visible = terms.length === 0
-                ? true
-                : terms.every(term => tags.some(tag => tag.includes(term)));
-            w.style.display = visible ? '' : 'none';
-        });
+    const wrappers = Array.from(list.querySelectorAll('.select_chat_block_wrapper'));
+    wrappers.forEach((w) => {
+        const fileName = w.querySelector('.select_chat_block')?.getAttribute('file_name') || '';
+        const tags = getTags(fileName, s);
+        const visible = terms.length === 0
+            ? true
+            : terms.every(term => tags.some(tag => tag.includes(term)));
+        w.style.display = visible ? '' : 'none';
+    });
 
-        const visibleWrappers = wrappers.filter(w => w.style.display !== 'none');
+    const visibleWrappers = wrappers.filter(w => w.style.display !== 'none');
 
-        // Append visible wrappers, then wrap into folder groups.
-        visibleWrappers.forEach(w => list.appendChild(w));
-        applyFolderGrouping(visibleWrappers, list, terms.length > 0);
-    } finally {
-        delete list.dataset.scmRendering;
-    }
+    // Append visible wrappers, then wrap into folder groups.
+    visibleWrappers.forEach(w => list.appendChild(w));
+    applyFolderGrouping(visibleWrappers, list, terms.length > 0);
 }
 
 function applyFolderGrouping(visibleWrappers, list, isFiltering) {
@@ -1519,7 +1744,7 @@ function applyFolderGrouping(visibleWrappers, list, isFiltering) {
     const buckets = new Map();
     for (const w of visibleWrappers) {
         const fileName = w.querySelector('.select_chat_block')?.getAttribute('file_name') || '';
-        const k = chatKey(fileName);
+        const k = resolveChatKey(fileName, s);
         const fid = s.chatFolder[k];
         if (fid && s.folders[fid]) {
             if (!buckets.has(fid)) buckets.set(fid, []);
@@ -1529,8 +1754,9 @@ function applyFolderGrouping(visibleWrappers, list, isFiltering) {
 
     migrateLegacyFolders(s, buckets, currentKey);
 
+    const index = buildFolderChildrenIndex(s);
     const frag = document.createDocumentFragment();
-    renderFolderTree(frag, null, s, buckets, isFiltering, currentKey);
+    renderFolderTree(frag, null, s, index, buckets, isFiltering, currentKey);
     // Folder groups go above ungrouped chats (which remain in document order).
     list.insertBefore(frag, list.firstChild);
 }
@@ -1558,23 +1784,41 @@ function migrateLegacyFolders(s, buckets, currentKey) {
     if (changed) saveSettings();
 }
 
-function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, currentKey, visited = new Set()) {
+/**
+ * parentId -> child folder ids, sorted by name. Built once per pass so the
+ * walkers below don't re-scan every folder at every node.
+ */
+function buildFolderChildrenIndex(s) {
+    const index = new Map();
+    for (const id of Object.keys(s.folders)) {
+        const pid = s.folders[id].parentId || null;
+        if (!index.has(pid)) index.set(pid, []);
+        index.get(pid).push(id);
+    }
+    for (const ids of index.values()) {
+        ids.sort((a, b) => s.folders[a].name.localeCompare(s.folders[b].name));
+    }
+    return index;
+}
+
+/** Child folders of `parentId` that belong to the active character. */
+function folderChildren(index, parentId, s, currentKey) {
+    return (index.get(parentId) || [])
+        .filter(id => (s.folders[id].charKey || null) === (currentKey || null));
+}
+
+function renderFolderTree(parentEl, parentId, s, index, buckets, isFiltering, currentKey, visited = new Set()) {
     // Cycle guard: if we've already visited this parentId in the current
     // recursion path, bail to prevent infinite loops from corrupted parentId
     // chains (e.g., A.parentId=B, B.parentId=A).
     if (visited.has(parentId)) return;
     visited.add(parentId);
 
-    const children = Object.keys(s.folders)
-        .filter(id => (s.folders[id].parentId || null) === parentId)
-        .filter(id => (s.folders[id].charKey || null) === (currentKey || null))
-        .sort((a, b) => s.folders[a].name.localeCompare(s.folders[b].name));
-
-    for (const fid of children) {
+    for (const fid of folderChildren(index, parentId, s, currentKey)) {
         const folder = s.folders[fid];
         const members = buckets.get(fid) || [];
         // While filtering, hide a folder iff its entire subtree has no visible chats.
-        if (isFiltering && !subtreeHasVisibleChats(fid, s, buckets, new Set())) continue;
+        if (isFiltering && !subtreeHasVisibleChats(fid, index, buckets, new Set())) continue;
 
         const group = document.createElement('div');
         group.className = 'scm-folder-group';
@@ -1586,7 +1830,7 @@ function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, currentKe
         if (folder.collapsed) body.hidden = true;
 
         // Sub-folders first, then this folder\'s own chats.
-        renderFolderTree(body, fid, s, buckets, isFiltering, currentKey, new Set(visited));
+        renderFolderTree(body, fid, s, index, buckets, isFiltering, currentKey, new Set(visited));
         for (const w of members) body.appendChild(w);
 
         group.appendChild(header);
@@ -1595,13 +1839,14 @@ function renderFolderTree(parentEl, parentId, s, buckets, isFiltering, currentKe
     }
 }
 
-function subtreeHasVisibleChats(folderId, s, buckets, visited) {
+// Not character-scoped, matching the folder buckets it reads: a chat of the
+// active character can still sit in a folder owned by another one.
+function subtreeHasVisibleChats(folderId, index, buckets, visited) {
     if (visited.has(folderId)) return false;
     visited.add(folderId);
     if ((buckets.get(folderId) || []).length > 0) return true;
-    for (const id of Object.keys(s.folders)) {
-        if ((s.folders[id].parentId || null) === folderId
-            && subtreeHasVisibleChats(id, s, buckets, visited)) return true;
+    for (const id of index.get(folderId) || []) {
+        if (subtreeHasVisibleChats(id, index, buckets, visited)) return true;
     }
     return false;
 }
@@ -1609,17 +1854,16 @@ function subtreeHasVisibleChats(folderId, s, buckets, visited) {
 
 function buildFolderTreeOptions(s, currentFid) {
     const lines = [];
+    const index = buildFolderChildrenIndex(s);
     const currentKey = getCurrentCharKey();
     const visited = new Set();
     const visit = (parentId, depth) => {
         if (visited.has(parentId)) return;
         visited.add(parentId);
-        const children = Object.keys(s.folders)
-            .filter(id => (s.folders[id].parentId || null) === parentId)
-            .filter(id => (s.folders[id].charKey || null) === (currentKey || null))
-            .sort((a, b) => s.folders[a].name.localeCompare(s.folders[b].name));
-        for (const id of children) {
-            const indent = '    '.repeat(depth);
+        for (const id of folderChildren(index, parentId, s, currentKey)) {
+            // NBSP, written as escapes: HTML collapses runs of plain spaces, so a
+            // literal-space indent here silently flattens the whole tree.
+            const indent = '\u00A0\u00A0\u00A0\u00A0'.repeat(depth);
             const sel = id === currentFid ? ' selected' : '';
             lines.push(`<option value="${escapeHtml(id)}"${sel}>${escapeHtml(indent + s.folders[id].name)}</option>`);
             visit(id, depth + 1);
@@ -1709,7 +1953,7 @@ function buildFolderHeader(folder, visibleCount) {
 
 async function openFolderPickerForChat(fileName) {
     const s = getSettings();
-    const k = chatKey(fileName);
+    const k = resolveChatKey(fileName, s);
     if (!k) return;
     const currentFid = s.chatFolder[k] || '';
 
@@ -2008,6 +2252,22 @@ function clearProfileForm() {
         .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
 }
 
+// Appends a blank profile and makes it active. Does not persist or repaint —
+// the caller decides when to do that, so it can fill the profile in first.
+function createProfile() {
+    const s = getSettings();
+    const p = {
+        id: uid(),
+        name: `${t('api_profile_default')} ${s.api.profiles.length + 1}`,
+        url: '',
+        key: '',
+        model: '',
+    };
+    s.api.profiles.push(p);
+    s.api.activeProfileId = p.id;
+    return p;
+}
+
 function bindProfileManager() {
     const s = getSettings();
 
@@ -2019,16 +2279,7 @@ function bindProfileManager() {
     });
 
     document.getElementById('scm_profile_new').addEventListener('click', () => {
-        const id = uid();
-        const newProfile = {
-            id,
-            name: `${t('api_profile_default')} ${s.api.profiles.length + 1}`,
-            url: '',
-            key: '',
-            model: '',
-        };
-        s.api.profiles.push(newProfile);
-        s.api.activeProfileId = id;
+        createProfile();
         saveSettings();
         refreshProfileSelector();
     });
@@ -2044,19 +2295,23 @@ function bindProfileManager() {
     });
 
     document.getElementById('scm_profile_save').addEventListener('click', () => {
-        if (!s.api.activeProfileId) {
-            // No profile yet — create one from the form fields.
-            document.getElementById('scm_profile_new').click();
-        }
-        const p = s.api.profiles.find(x => x.id === s.api.activeProfileId);
-        if (!p) return;
-        p.name = document.getElementById('scm_profile_name').value.trim() || p.name;
-        p.url = document.getElementById('scm_custom_url').value.trim();
-        p.key = document.getElementById('scm_custom_key').value;
-        p.model = document.getElementById('scm_custom_model').value.trim();
+        // Read the form first: creating a profile repaints the selector, which
+        // reloads the (empty) new profile into these very inputs.
+        const name = document.getElementById('scm_profile_name').value.trim();
+        const url = document.getElementById('scm_custom_url').value.trim();
+        const key = document.getElementById('scm_custom_key').value;
+        const model = document.getElementById('scm_custom_model').value.trim();
+
+        // No profile yet — create one and fill it from the captured values.
+        const p = s.api.profiles.find(x => x.id === s.api.activeProfileId) || createProfile();
+        p.name = name || p.name;
+        p.url = url;
+        p.key = key;
+        p.model = model;
         saveSettings();
         refreshProfileSelector();
         toastr.success(t('toast_saved'));
+        if (key && /^http:\/\//i.test(url)) toastr.warning(t('warn_http_key'));
     });
 }
 
@@ -2078,7 +2333,7 @@ function bindSettingsPanel() {
         refreshPromptSelectors();
         refreshProfileSelector();
         document.getElementById('scm_pc_toolbar')?.remove();
-        if (document.getElementById('shadow_select_chat_popup')?.style.display !== 'none') {
+        if (isPastChatsPopupOpen()) {
             injectPastChatsToolbar();
         }
     });
@@ -2222,7 +2477,18 @@ async function runResetFlow() {
 }
 
 async function resetExtension() {
-    extension_settings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
+    // Mutated in place so references captured by other closures keep pointing
+    // at the live object. Language is kept, otherwise the UI (and the toast
+    // below) would flip mid-action.
+    const s = getSettings();
+    const keepLanguage = s.language;
+    for (const k of Object.keys(s)) {
+        if (!(k in DEFAULT_SETTINGS)) delete s[k];
+    }
+    for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+        s[k] = structuredClone(v);
+    }
+    s.language = keepLanguage;
 
     // Flush to disk SYNCHRONOUSLY before reloading. saveSettingsDebounced
     // is on a 1000ms timer (constants.js: debounce_timeout.relaxed) and the
@@ -2247,10 +2513,90 @@ function onMessageEvent() {
     if (!s.autoName.enabled) return;
     const fileName = getCurrentChatId();
     if (!fileName) return;
-    if (s.autoNamed[fileName]) return;
+    if (s.autoNamed[resolveChatKey(fileName, s)]) return;
     if (!Array.isArray(currentChat)) return;
     if (currentChat.length < s.autoName.threshold) return;
     runAutoName().catch(err => console.error(`[${MODULE_NAME}]`, err));
+}
+
+/**
+ * ST emits CHAT_DELETED / GROUP_CHAT_DELETED with the chat file name (already
+ * stripped of `.jsonl`). Without this the records outlive the chat, and a new
+ * chat that later takes the same name inherits the dead one's tags and folder.
+ */
+function onChatDeleted(name) {
+    const bare = bareChatKey(name);
+    if (!bare) return;
+    // Purge the composite key and the legacy bare one: a chat deleted before
+    // its records were adopted still has them under the old key.
+    let changed = purgeChatRecords(chatKey(name));
+    if (purgeChatRecords(bare)) changed = true;
+    // The bulk-move count is driven by the set, so it has to shrink with it.
+    if (selectedChats.delete(`${bare}.jsonl`)) updateBulkMoveButton();
+    if (changed) saveSettings();
+}
+
+/**
+ * ST emits CHARACTER_DELETED with { id, character } after deleteCharacter has
+ * already run closeCurrentChat(), so by the time the per-chat CHAT_DELETED
+ * events fire there is no selected character and getCurrentCharKey() is empty —
+ * every composite record of that character survives the deletion. Sweep them by
+ * key prefix instead, together with the character's folders, which are
+ * charKey-scoped and would otherwise sit in the settings forever, invisible to
+ * a UI that only ever renders the active character's tree.
+ */
+function onCharacterDeleted(data) {
+    const avatar = data?.character?.avatar || data?.avatar;
+    if (!avatar) return;
+    const charKey = `char:${avatar}`;
+    const prefix = `${charKey}::`;
+    const s = getSettings();
+    let changed = false;
+
+    for (const map of [s.tags, s.autoNamed, s.chatFolder]) {
+        for (const k of Object.keys(map)) {
+            if (k.startsWith(prefix)) {
+                delete map[k];
+                changed = true;
+            }
+        }
+    }
+
+    const keptPrompted = s.branchPromptedFor.filter(k => !String(k).startsWith(prefix));
+    if (keptPrompted.length !== s.branchPromptedFor.length) {
+        s.branchPromptedFor = keptPrompted;
+        changed = true;
+    }
+
+    for (const id of Object.keys(s.folders)) {
+        const f = s.folders[id];
+        if (f.charKey === charKey) {
+            delete s.folders[id];
+            changed = true;
+            continue;
+        }
+        // A folder owned by someone else can still list this character's chats
+        // (legacy folders predate charKey, and moves don't re-scope).
+        if (!Array.isArray(f.chats)) continue;
+        const keptChats = f.chats.filter(c => !String(c).startsWith(prefix));
+        if (keptChats.length !== f.chats.length) {
+            f.chats = keptChats;
+            changed = true;
+        }
+    }
+
+    // Sub-folders inherit their parent's charKey, so they go with the sweep
+    // above — but a legacy folder with no charKey could be left pointing at a
+    // parent that just disappeared. Pull those back to the root.
+    for (const id of Object.keys(s.folders)) {
+        const pid = s.folders[id].parentId;
+        if (pid && !s.folders[pid]) {
+            s.folders[id].parentId = null;
+            changed = true;
+        }
+    }
+
+    if (changed) saveSettings();
 }
 
 function onChatChanged() {
@@ -2280,8 +2626,8 @@ async function maybePromptBranchFolder() {
     const parentName = chat_metadata && chat_metadata.main_chat;
     if (!parentName) return; // not a branch
 
-    const branchK = chatKey(branchName);
-    const parentK = chatKey(parentName);
+    const branchK = resolveChatKey(branchName, s);
+    const parentK = resolveChatKey(parentName, s);
     if (!branchK || !parentK || branchK === parentK) return;
 
     // Skip if already prompted OR if already in a folder
@@ -2298,7 +2644,7 @@ async function maybePromptBranchFolder() {
     branchPromptOpen = true;
     let choice;
     try {
-        choice = await promptBranchFolderChoice(parentK, parentFolder);
+        choice = await promptBranchFolderChoice(bareChatKey(parentName), parentFolder);
     } finally {
         branchPromptOpen = false;
     }
@@ -2343,11 +2689,11 @@ async function maybePromptBranchFolder() {
     }
 }
 
-async function promptBranchFolderChoice(parentK, parentFolder) {
+async function promptBranchFolderChoice(parentLabel, parentFolder) {
     const s = getSettings();
     const defaultName = parentFolder
-        ? `${parentFolder.name} / ${t('branch_default_folder_name').replace('{name}', parentK)}`
-        : t('branch_default_folder_name').replace('{name}', parentK);
+        ? `${parentFolder.name} / ${t('branch_default_folder_name').replace('{name}', parentLabel)}`
+        : t('branch_default_folder_name').replace('{name}', parentLabel);
 
     const parentFolderLabel = parentFolder
         ? t('branch_choice_parent').replace('{folder}', parentFolder.name)
@@ -2405,7 +2751,11 @@ async function promptBranchFolderChoice(parentK, parentFolder) {
         </div>
     `;
 
-    const popupPromise = callGenericPopup(html, POPUP_TYPE.CONFIRM);
+    // ST's .popup-content is overflow:hidden, so a deep folder chain would push
+    // the bottom radios and the name field out of reach on a short viewport.
+    const popupPromise = callGenericPopup(html, POPUP_TYPE.CONFIRM, '', {
+        allowVerticalScrolling: true,
+    });
     let action = 'new';
     let name = defaultName;
     await new Promise(r => setTimeout(r, 0));
@@ -2436,21 +2786,38 @@ function escapeHtml(s) {
         .replace(/'/g, '&#39;');
 }
 
+function isPastChatsPopupOpen() {
+    const shadow = document.getElementById('shadow_select_chat_popup');
+    return !!shadow && getComputedStyle(shadow).display !== 'none';
+}
+
 function startPastChatsObserver() {
     const target = document.getElementById('select_chat_div');
     if (!target) return;
+    const options = { childList: true, subtree: false };
     let pending = false;
-    new MutationObserver(() => {
-        // Skip mutations that came from our own re-grouping pass.
-        if (target.dataset.scmRendering === '1') return;
+    const observer = new MutationObserver(() => {
         if (pending) return;
         pending = true;
         requestAnimationFrame(() => {
             pending = false;
-            refreshPastChatsBadges();
-            applyPastChatsFilterAndSort();
+            // Nothing to re-group once the popup is gone.
+            if (!isPastChatsPopupOpen()) return;
+            // Our own pass churns the list, and a re-append of an attached node
+            // still records a removal + an addition. Observer callbacks are
+            // delivered as a microtask *after* the pass, so a flag set and
+            // cleared inside it can't suppress them — detaching for the
+            // duration can, since disconnect() drops the queued records too.
+            observer.disconnect();
+            try {
+                refreshPastChatsBadges();
+                applyPastChatsFilterAndSort();
+            } finally {
+                Promise.resolve().then(() => observer.observe(target, options));
+            }
         });
-    }).observe(target, { childList: true, subtree: false });
+    });
+    observer.observe(target, options);
 }
 
 function startPastChatsPopupObserver() {
@@ -2460,6 +2827,10 @@ function startPastChatsPopupObserver() {
         const visible = shadow.style.display !== 'none';
         if (visible) {
             injectPastChatsToolbar();
+            // The selection is per popup session. It has to be dropped here now
+            // that it survives list rebuilds, otherwise chats picked for one
+            // character would be bulk-moved into the next character's folders.
+            exitSelectMode();
             setTimeout(() => {
                 refreshPastChatsBadges();
                 applyPastChatsFilterAndSort();
@@ -2474,7 +2845,7 @@ function startPastChatsPopupObserver() {
 
 jQuery(async () => {
     try {
-        getSettings();
+        migrateSettings();
 
         // Inject the settings panel. We mount into #extensions_settings2,
         // falling back to #extensions_settings, then to <body> if neither
@@ -2497,9 +2868,21 @@ jQuery(async () => {
         refreshProfileSelector();
         renderCurrentTags();
 
+        // Only on the reply: naming on MESSAGE_SENT renames and reloads the chat
+        // while the generation for that message is still running.
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageEvent);
-        eventSource.on(event_types.MESSAGE_SENT, onMessageEvent);
         eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+
+        // Guarded: older ST builds don't define the deletion events.
+        if (event_types?.CHAT_DELETED) {
+            eventSource.on(event_types.CHAT_DELETED, onChatDeleted);
+        }
+        if (event_types?.GROUP_CHAT_DELETED) {
+            eventSource.on(event_types.GROUP_CHAT_DELETED, onChatDeleted);
+        }
+        if (event_types?.CHARACTER_DELETED) {
+            eventSource.on(event_types.CHARACTER_DELETED, onCharacterDeleted);
+        }
 
         startPastChatsPopupObserver();
         startPastChatsObserver();

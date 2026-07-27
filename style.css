@@ -232,6 +232,18 @@
     margin-left: 0;
 }
 
+/* ST's .popup is text-align: center, which these dialogs would otherwise
+   inherit — centred labels and option rows are unreadable as a list. */
+.scm-move-root,
+.scm-branch-choice {
+    text-align: left;
+}
+
+.scm-move-root label,
+.scm-branch-choice label {
+    text-align: left;
+}
+
 .scm-branch-radios {
     display: flex;
     flex-direction: column;
